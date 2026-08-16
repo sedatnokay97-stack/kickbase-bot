@@ -1,39 +1,68 @@
 import os
 import requests
+import json
 
-# Zugangsdaten
+# Zugangsdaten aus den GitHub Secrets
 KB_EMAIL = os.environ.get("KB_EMAIL")
 KB_PASSWORD = os.environ.get("KB_PASSWORD")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+def send_telegram(text):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Telegram Variablen fehlen!")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    response = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"})
+    print(f"Telegram Status: {response.status_code}")
 
 def main():
-    print("▶️ Starte Direkttest an Kickbase...")
+    print("▶️ Starte Direkt-Verbindung zur Kickbase V4 API...")
     
-    # Wir tarnen den Bot als normales iPhone
+    # Wir geben uns als normales Smartphone aus
     headers = {
         "User-Agent": "Kickbase/6.8.0 (iPhone; iOS 16.5; Scale/3.00)",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Accept": "application/json"
     }
     
+    # Die neue Art, wie Kickbase die Daten haben will (V4 Format)
     payload = {
-        "email": KB_EMAIL,
-        "password": KB_PASSWORD,
-        "ext": False
+        "em": KB_EMAIL,
+        "pass": KB_PASSWORD,
+        "loy": False,
+        "rep": {}
     }
     
-    print("⏳ Klopfe an der Kickbase-Tür...")
     try:
-        url = "https://api.kickbase.com/user/login"
+        url = "https://api.kickbase.com/v4/user/login"
+        print(f"⏳ Logge ein bei Kickbase v4 mit {KB_EMAIL}...")
+        
+        # Anfrage abschicken
         response = requests.post(url, json=payload, headers=headers)
         
-        print(f"📊 Status Code: {response.status_code}")
-        print(f"🗣️ Kickbase Server-Antwort: {response.text}")
-        
         if response.status_code == 200:
-            print("✅ Login hat manuell geklappt! Das Kickbase-Paket ist kaputt, wir müssen es selbst schreiben.")
-        elif response.status_code == 403:
-            print("❌ 403 Forbidden: Kickbase blockiert die GitHub-Server (Türsteher-Effekt).")
-        elif response.status_code == 401:
-            print("❌ 401 Unauthorized: Irgendwas stimmt mit der E-Mail/Passwort-Kombination nicht.")
+            print("✅ LOGIN ERFOLGREICH!")
+            data = response.json()
+            
+            # Token und Ligen auslesen
+            token = data.get("tkn")
+            ligen = data.get("srvl", [])
+            
+            msg = "✅ *Kickbase Bot erfolgreich verbunden!*\n\n"
+            msg += "Wir sind drin! Die neue V4 API Tür wurde geknackt. 🔓\n\n"
+            msg += f"Gefundene Ligen: {len(ligen)}\n"
+            
+            for liga in ligen:
+                # n = Name der Liga, i = ID der Liga
+                liga_name = liga.get('n', 'Unbekannte Liga')
+                msg += f"⚽ {liga_name}\n"
+                
+            send_telegram(msg)
+            print("✅ Erfolgs-Nachricht an Telegram gesendet!")
+            
+        else:
+            print(f"❌ Fehler {response.status_code}: {response.text}")
             
     except Exception as e:
         print(f"❌ System-Fehler: {str(e)}")
