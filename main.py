@@ -1,5 +1,6 @@
 import os
 import requests
+import traceback
 from kickbase_api.kickbase import Kickbase
 
 # Zugangsdaten laden
@@ -35,7 +36,8 @@ def main():
         print("✅ Skript komplett durchgelaufen!")
         
     except Exception as e:
-        print(f"❌ FEHLER AUFGETRETEN: {str(e)}")
+        print("❌ FEHLER-DETAILS (Bitte kopieren/fotografieren):")
+        print(traceback.format_exc())
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
