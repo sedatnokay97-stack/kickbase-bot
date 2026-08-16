@@ -1,6 +1,5 @@
 import os
 import requests
-import json
 
 KB_EMAIL = os.environ.get("KB_EMAIL")
 KB_PASSWORD = os.environ.get("KB_PASSWORD")
@@ -17,38 +16,37 @@ def main():
     
     try:
         # 1. Login
+        print("⏳ Logge ein...")
         login_res = requests.post("https://api.kickbase.com/v4/user/login", json=payload, headers=headers).json()
         token = login_res.get("tkn")
-        liga_id = login_res.get("srvl", [])[0].get("i") 
         
-        # 2. Transfermarkt abrufen
+        # Liga ID & Name auslesen
+        ligen = login_res.get("srvl", [])
+        if not ligen:
+            print("❌ Keine Ligen gefunden!")
+            return
+            
+        liga_id = ligen[0].get("i")
+        liga_name = ligen[0].get("n", "Unbekannt")
+        print(f"✅ Eingeloggt! Lade Markt für Liga: {liga_name}")
+        
+        # 2. Transfermarkt abrufen (Jetzt OHNE das /v4/ in der URL!)
         headers["Authorization"] = f"Bearer {token}"
-        market_url = f"https://api.kickbase.com/v4/leagues/{liga_id}/market"
+        market_url = f"https://api.kickbase.com/leagues/{liga_id}/market"
+        
+        print("⏳ Lade Transfermarkt herunter...")
         market_res = requests.get(market_url, headers=headers).json()
         
-        # --- DETEKTIV-ARBEIT ---
-        print("🔍 Struktur der Kickbase-Antwort:")
-        if isinstance(market_res, dict):
-            print(f"Schlüssel (Keys) gefunden: {list(market_res.keys())}")
-            # Wir checken verschiedene mögliche Namen für die Spieler-Liste
-            players = market_res.get("players", market_res.get("p", market_res.get("items", [])))
-        elif isinstance(market_res, list):
-            print("Die Antwort ist direkt eine Liste!")
-            players = market_res
-        else:
-            players = []
-
-        print(f"Anzahl extrahierter Spieler: {len(players)}")
-        
-        # Wenn immer noch 0 Spieler gefunden werden, drucken wir die echten Daten ins Log
-        if len(players) == 0:
-            print("⚠️ Immer noch 0 Spieler. Hier ist die rohe Server-Antwort (erste 500 Zeichen):")
-            print(str(market_res)[:500])
-            send_telegram("⚠️ Finde 0 Spieler. Wir müssen im GitHub-Log nachschauen, wie Kickbase die Liste nennt!")
+        # Prüfen, ob Kickbase wieder meckert
+        if "err" in market_res:
+            print(f"❌ Kickbase meldet einen Fehler: {market_res}")
             return
-
+            
+        players = market_res.get("players", [])
+        print(f"✅ {len(players)} Spieler gefunden!")
+        
         # 3. Telegram-Nachricht bauen
-        msg = f"📈 *Dein Transfermarkt ist live!*\n\n"
+        msg = f"📈 *Transfermarkt: {liga_name}*\n\n"
         msg += f"Aktuell sind *{len(players)} Spieler* auf dem Markt.\n\n"
         msg += "Hier sind 5 zufällige Spieler zur Probe:\n"
         
@@ -64,7 +62,6 @@ def main():
         
     except Exception as e:
         print(f"❌ Fehler: {str(e)}")
-        send_telegram("❌ Fehler beim Marktabruf. Schau in die GitHub Logs!")
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
