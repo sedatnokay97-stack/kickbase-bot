@@ -2,44 +2,45 @@ import os
 import requests
 from kickbase_api.kickbase import Kickbase
 
-# 1. Zugangsdaten aus den sicheren Secrets laden
+# Zugangsdaten laden
 KB_EMAIL = os.environ.get("KB_EMAIL")
 KB_PASSWORD = os.environ.get("KB_PASSWORD")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 def main():
+    print("▶️ Starte das Skript...")
     try:
-        # Kickbase Login
+        print(f"⏳ Versuche Kickbase Login für: {KB_EMAIL}")
         kb = Kickbase()
         kb.login(KB_EMAIL, KB_PASSWORD)
+        print("✅ Kickbase Login erfolgreich!")
         
         leagues = kb.leagues()
         if not leagues:
-            send_telegram("⚠️ Login erfolgreich, aber keine Liga gefunden!")
+            print("⚠️ Login hat geklappt, aber du bist in keiner Liga!")
             return
             
         league = leagues[0]
+        print(f"✅ Liga gefunden: {league.name}")
+        
+        print("⏳ Lade Transfermarkt...")
         market = kb.market(league)
         
-        # Einfache Übersicht für den Start
         msg = f"⚽ *Kickbase Update - {league.name}*\n\n"
-        msg += f"📊 *Spieler auf dem Transfermarkt:* {len(market.players)}\n\n"
+        msg += f"📊 *Spieler auf dem Transfermarkt:* {len(market.players)}\n"
         
-        msg += "*Top 5 Marktwert-Steigerungen:*\n"
-        # Sortiere nach Marktwerttrend
-        sorted_players = sorted(market.players, key=lambda p: p.market_value_trend, reverse=True)[:5]
-        for p in sorted_players:
-            msg += f"• {p.first_name} {p.last_name}: +{p.market_value_trend:,} €\n"
-            
+        print("⏳ Sende Nachricht an Telegram...")
         send_telegram(msg)
+        print("✅ Skript komplett durchgelaufen!")
         
     except Exception as e:
-        send_telegram(f"❌ Fehler beim Abrufen: {str(e)}")
+        print(f"❌ FEHLER AUFGETRETEN: {str(e)}")
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"})
+    response = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"})
+    print(f"Telegram Status: Code {response.status_code} | Antwort: {response.text}")
 
 if __name__ == "__main__":
     main()
