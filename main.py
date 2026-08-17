@@ -44,6 +44,7 @@ CONFIG = {
     "FIXTURE_LOOKAHEAD": 3,
     "SEASON_YEAR": 2026,
     "COMPETITION_ID": "1",
+    "NEWS_FILTER_WITH_GEMINI": True,
     "OVERPAY_TIERS": [
         (110, 0.30),
         (60, 0.15),
@@ -84,7 +85,6 @@ TEAM_LINEUP_SLUGS = {
 
 BUNDESLIGA_TEAM_KEYS = list(TEAM_LINEUP_SLUGS.keys())
 
-# Lesbare Anzeigenamen fuer die Team-Keys (fuer Restprogramm-Gegner-Anzeige)
 TEAM_DISPLAY_NAMES = {
     "bayern": "Bayern",
     "werder": "Werder Bremen",
@@ -107,9 +107,7 @@ TEAM_DISPLAY_NAMES = {
     "elversberg": "Elversberg",
 }
 
-# Manuell verifizierte Zuordnung Kickbase-interne tid -> Team-Key.
-# WICHTIG: tid kommt als STRING aus der Kickbase-API (z.B. "7"), daher hier
-# ebenfalls als String-Keys hinterlegt - sonst schlaegt der dict-Lookup fehl!
+# Manuell verifizierte Zuordnung Kickbase-interne tid -> Team-Key (String-Keys!).
 # 12 von 18 Vereinen bestaetigt. Offen: dortmund, schalke, hamburg,
 # augsburg, paderborn, elversberg.
 KICKBASE_TID_TO_TEAM = {
@@ -308,12 +306,7 @@ def get_my_budget(liga_id):
 
 
 def get_team_names():
-    """
-    Liefert tid (als String) -> Team-Key. Da Kickbase v4 keinen dokumentierten
-    Team-Namen-Endpoint hat, nutzen wir primaer eine manuell verifizierte statische
-    Zuordnung (KICKBASE_TID_TO_TEAM) und versuchen zusaetzlich einen (evtl. nicht
-    funktionierenden) API-Call als Fallback/Erweiterung.
-    """
+    """Liefert tid (als String) -> Team-Key."""
     names = {}
     try:
         res = session.get(
@@ -332,7 +325,6 @@ def get_team_names():
     except Exception as e:
         print(f"Warnung: Team-Namen ueber API nicht ladbar (nutze statische Zuordnung): {e}")
 
-    # Statische, manuell verifizierte Zuordnung ueberschreibt/ergaenzt die API-Antwort
     for tid, team_key in KICKBASE_TID_TO_TEAM.items():
         names[str(tid)] = team_key
 
@@ -340,7 +332,6 @@ def get_team_names():
 
 
 def get_team_key(team_name):
-    """Matched einen beliebigen Vereinsnamen ODER bereits einen Team-Key auf einen der 18 festen Team-Keys."""
     if not team_name:
         return None
     name_lower = team_name.lower()
@@ -356,11 +347,6 @@ def find_ligainsider_slug(team_name):
 
 
 def get_predicted_lineup(slug_id):
-    """
-    Scraped die voraussichtliche Startelf (naechstes Spiel) von LigaInsider.
-    Heuristik: erste bis zu 11 fettgedruckte Namen ohne bekannte Label-Phrasen.
-    Kein Ersatz fuer die exakte Ampelfarbe aus der Kickbase-App.
-    """
     url = f"https://www.ligainsider.de/bundesliga/team/{slug_id}/"
     names = []
     try:
@@ -387,7 +373,6 @@ def get_predicted_lineup(slug_id):
 
 
 def get_season_fixtures():
-    """Laedt den kompletten Saison-Spielplan (alle Spieltage) ueber die freie OpenLigaDB-API."""
     url = f"https://api.openligadb.de/getmatchdata/bl1/{CONFIG['SEASON_YEAR']}"
     try:
         res = requests.get(url, timeout=CONFIG["REQUEST_TIMEOUT"])
@@ -404,7 +389,6 @@ def get_team_strength(team_key):
 
 
 def get_upcoming_opponents(fixtures, team_key, count):
-    """Gibt eine sortierte Liste von (datum, gegner_team_key) fuer die naechsten Spiele zurueck."""
     upcoming = []
     for m in fixtures:
         if m.get("matchIsFinished"):
@@ -422,7 +406,6 @@ def get_upcoming_opponents(fixtures, team_key, count):
 
 
 def fixture_difficulty(fixtures, team_key):
-    """Bewertet das Restprogramm eines Vereins anhand der Staerke (Vorsaison-Punkte) der naechsten Gegner."""
     if not team_key or not fixtures:
         return None
     opponents = get_upcoming_opponents(fixtures, team_key, CONFIG["FIXTURE_LOOKAHEAD"])
@@ -451,7 +434,6 @@ def market_updates_until_first_matchday():
 
 
 def winter_reset_warning():
-    """Gibt eine Warnmeldung zurueck, falls das Winter-Reset-Datum bald erreicht ist, sonst None."""
     today = datetime.now(timezone.utc).date()
     reset_date = CONFIG["WINTER_RESET_DATE"]
     days_left = (reset_date - today).days
@@ -463,11 +445,62 @@ def winter_reset_warning():
     return None
 
 
-def match_news_for_player(lastname, news_headlines):
+def filter_news_with_gemini(news_headlines, player_names):
+    """
+    Nutzt Gemini, um Regex-Namenstreffer zu validieren (verhindert Verwechslung bei
+    gleichen Nachnamen, z.B. mehrere Spieler namens 'Müller') und ordnet ein Sentiment
+    (positiv/negativ/neutral) bezogen auf Kickbase-Tauglichkeit zu.
+    Gibt {lastname: [{"headline":..., "sentiment":...}, ...]} zurueck, oder {} bei Fehler.
+    """
+    if not GEMINI_API_KEY or not news_headlines or not player_names:
+        return {}
+    prompt = f"""Du bekommst eine Liste von Fussball-News-Schlagzeilen und eine Liste von Spieler-Nachnamen.
+Ordne JEDE Schlagzeile, die eindeutig zu einem der genannten Spieler passt (nicht zu einer anderen
+Person mit zufaellig gleichem Nachnamen), dem jeweiligen Namen zu.
+Bewerte jede zugeordnete Schlagzeile mit "positiv", "negativ" oder "neutral" bezogen auf die
+Kickbase-Tauglichkeit (Verletzung/Sperre/Bankplatz = negativ, Startelfgarantie/gute Form/Torbeteiligung = positiv).
+
+Spieler-Nachnamen: {", ".join(player_names)}
+
+Schlagzeilen:
+{json.dumps(news_headlines, ensure_ascii=False)}
+
+Antworte NUR mit validem JSON (keine Erklaerungen, kein Markdown-Codeblock) in exakt diesem Format:
+{{"Nachname": [{{"headline": "...", "sentiment": "negativ"}}]}}
+Lass Spieler ohne relevante Treffer komplett weg."""
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        response = client.models.generate_content(
+            model=CONFIG["GEMINI_MODEL"],
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=1000,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            ),
+        )
+        text = (response.text or "").strip()
+        text = re.sub(r"^```(json)?|```$", "", text, flags=re.MULTILINE).strip()
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+        return {}
+    except Exception as e:
+        print(f"Warnung: Gemini-News-Filter fehlgeschlagen (nutze Regex-Fallback): {e}")
+        return {}
+
+
+def match_news_for_player(lastname, news_headlines, gemini_news_map=None):
+    """
+    Liefert eine Liste von {"headline":..., "sentiment": str|None} fuer einen Spieler.
+    Nutzt bevorzugt die Gemini-validierten Treffer; faellt sonst auf einfaches Regex-Matching zurueck.
+    """
+    if gemini_news_map and lastname in gemini_news_map:
+        return gemini_news_map[lastname]
     matched = []
     for headline in news_headlines:
         if re.search(r'\b' + re.escape(lastname) + r'\b', headline, re.IGNORECASE):
-            matched.append(headline)
+            matched.append({"headline": headline, "sentiment": None})
     return matched
 
 
@@ -495,14 +528,13 @@ def extract_points(p, p_detail):
 
 
 def get_overpay_pct(avg_points):
-    """Staffelt das erlaubte Overpay-Limit nach Punkte-Tier statt starrem Prozentwert."""
     for threshold, pct in CONFIG["OVERPAY_TIERS"]:
         if avg_points >= threshold:
             return pct
     return CONFIG["OVERPAY_TIERS"][-1][1]
 
 
-def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles, my_budget, lineup_names=None, fixture_info=None):
+def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles, my_budget, lineup_names=None, fixture_info=None, gemini_news_map=None):
     lastname = p.get("n", "Unbekannt")
     mv = p.get("mv", 0)
     trend_flag = p.get("mvt")
@@ -514,11 +546,18 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
 
     total_points, avg_points = extract_points(p, p_detail)
 
-    matched_news = match_news_for_player(lastname, news_headlines)
-    has_negative_news = any(
-        re.search(r"(verletzt|muskul|ausfall|gesperrt|rot|kreuzband|bruch|reha|trainingsrückstand)", h, re.IGNORECASE)
-        for h in matched_news
-    )
+    matched_news = match_news_for_player(lastname, news_headlines, gemini_news_map)
+    has_negative_news = False
+    for item in matched_news:
+        if item.get("sentiment") == "negativ":
+            has_negative_news = True
+            break
+        if item.get("sentiment") is None and re.search(
+            r"(verletzt|muskul|ausfall|gesperrt|rot|kreuzband|bruch|reha|trainingsr\u00fcckstand)",
+            item.get("headline", ""), re.IGNORECASE,
+        ):
+            has_negative_news = True
+            break
 
     my_count_for_team = my_team_counts.get(tid, 0)
     violates_my_limit = my_count_for_team >= CONFIG["MAX_PER_TEAM"]
@@ -618,7 +657,7 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     if is_injured:
         reasons.append("Verletzungs-/Sperrrisiko (Kickbase)")
     if has_negative_news:
-        reasons.append("kritische News aus mehreren Quellen")
+        reasons.append("kritische News (Gemini-validiert)" if any(i.get("sentiment") for i in matched_news) else "kritische News aus mehreren Quellen")
     if mw_cycles > 0:
         reasons.append(f"{mw_cycles} Marktwert-Updates bis 1. Spieltag")
     if violates_my_limit:
@@ -632,7 +671,7 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
         "label": label,
         "reason": ", ".join(reasons) if reasons else "keine besonderen Risiken",
         "max_bid": max_bid,
-        "matched_news": matched_news[:3],
+        "matched_news": [item.get("headline", "") for item in matched_news[:3]],
         "is_injured": is_injured,
         "total_points": total_points,
         "avg_points": avg_points,
@@ -760,6 +799,15 @@ def main():
         alle_tids = [{"name": p.get("n"), "tid": p.get("tid")} for p in players[:CONFIG["PLAYERS_TO_SHOW"]]]
         print("DEBUG Alle Name->tid dieser Marktliste:", json.dumps(alle_tids, ensure_ascii=False))
 
+    player_lastnames = [p.get("n") for p in players[:CONFIG["PLAYERS_TO_SHOW"]] if p.get("n")]
+    gemini_news_map = (
+        filter_news_with_gemini(news_headlines, player_lastnames)
+        if CONFIG["NEWS_FILTER_WITH_GEMINI"]
+        else {}
+    )
+    if CONFIG["DEBUG_PLAYER_DETAIL"]:
+        print("DEBUG Gemini-News-Map:", json.dumps(gemini_news_map, ensure_ascii=False)[:1500])
+
     msg = "⚽ <b>Markt-Update: Kickbase Elite</b>\n\n"
 
     winter_warning = winter_reset_warning()
@@ -810,7 +858,8 @@ def main():
             fixture_info = fixture_cache[team_key]
 
         eval_result = evaluate_player(
-            p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles, my_budget, lineup_names, fixture_info
+            p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles, my_budget,
+            lineup_names, fixture_info, gemini_news_map
         )
         max_bid_str = f"{eval_result['max_bid']:,}".replace(",", ".")
 
