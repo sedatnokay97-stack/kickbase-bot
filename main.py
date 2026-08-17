@@ -484,9 +484,21 @@ def main():
 
     # -----------------------------------------------------------------
     # TEMPORÄRER DEBUG-BLOCK: Startelf-Wahrscheinlichkeit erkunden
-    # (Nach dem ersten erfolgreichen Test kannst du diesen Block wieder löschen)
+    # (Nutzt den eigenen Kader statt Markt, damit es unabhängig davon
+    # funktioniert, ob gerade Spieler auf dem Markt sind.)
     # -----------------------------------------------------------------
-    debug_player_id = players[0].get("id") if players else None
+    try:
+        my_squad_res = session.get(
+            f"https://api.kickbase.com/v4/leagues/{liga_id}/managers/{my_manager_id}/squad",
+            timeout=CONFIG["REQUEST_TIMEOUT"],
+        )
+        my_squad_items = my_squad_res.json().get("it", [])
+        debug_player_id = my_squad_items[0].get("id") if my_squad_items else None
+        print("DEBUG: Anzahl eigener Kaderspieler:", len(my_squad_items))
+    except Exception as e:
+        debug_player_id = None
+        print("Fehler beim Laden des eigenen Kaders fuer Debug:", e)
+
     if debug_player_id:
         try:
             r1 = session.get(
@@ -505,9 +517,12 @@ def main():
             print("MYELEVEN:", r2.status_code, r2.text[:1500])
         except Exception as e:
             print("Fehler myeleven:", e)
+    else:
+        print("DEBUG: Kein Spieler im eigenen Kader gefunden - Debug-Block übersprungen.")
     # -----------------------------------------------------------------
     # ENDE DEBUG-BLOCK
     # -----------------------------------------------------------------
+ 
 
     blocked_teams = build_blocked_teams(liga_id, ranking_res, my_manager_id)
     my_team_counts = get_my_team_counts(liga_id, my_manager_id)
