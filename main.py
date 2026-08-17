@@ -53,6 +53,7 @@ NEWS_FEEDS = [
     # Sportschau (ARD) Bundesliga-News
     "https://www.sportschau.de/fussball/bundesliga/index~rss2.xml",
 ]
+
 # LigaInsider Verletzten-/Sperren-Liste (HTML-Scraping)
 LIGAINSIDER_INJURY_URL = "https://www.ligainsider.de/bundesliga/verletzte-und-gesperrte-spieler/"
 
@@ -123,7 +124,7 @@ def get_news():
     """
     Sammelt News-Headlines aus mehreren Quellen:
     - Kicker Bundesliga RSS
-    - Transfermarkt RSS
+    - Transfermarkt-News via t-online RSS
     - Sportschau RSS
     - LigaInsider HTML-Verletztenseite
     """
@@ -270,8 +271,9 @@ def match_news_for_player(lastname, news_headlines):
 
 def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles):
     """
-    Bewertet einen Marktspieler nach Marktwert, Trend, News, Verletzung und Ligaregeln.
-    Gibt ein Dict mit Label, Begründung, max_bid, News und Verletzungsflag zurück.
+    Bewertet einen Marktspieler nach Marktwert, Trend, News, Verletzung,
+    Punkte-Leistung und Ligaregeln.
+    Gibt ein Dict mit Label, Begründung, max_bid, News, Punkten und Verletzungsflag zurück.
     """
     lastname = p.get("n", "Unbekannt")
     mv = p.get("mv", 0)
@@ -281,6 +283,10 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     st_market = str(p.get("st", "0"))
     st_detail = str(p_detail.get("status", p_detail.get("st", "0")) if p_detail else "0")
     is_injured = st_market in ["1", "2", "4", "8"] or st_detail in ["1", "2", "4", "8"]
+
+    # Punkte-/Leistungsdaten aus den Detaildaten (falls vorhanden)
+    total_points = p_detail.get("p", 0) if p_detail else 0
+    avg_points = p_detail.get("ap", 0) if p_detail else 0
 
     matched_news = match_news_for_player(lastname, news_headlines)
     has_negative_news = any(
@@ -298,6 +304,7 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
 
     score = 0
 
+    # Marktwert ~ grobe Qualitätsskala
     if mv < 2_000_000:
         score += 1
     elif mv < 6_000_000:
@@ -307,16 +314,29 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     else:
         score += 4
 
+    # Marktwert-Trend
     if trend_flag == 1:
         score += 2
     elif trend_flag == 2:
         score -= 1
 
+    # Zeit bis Spieltag
     if mw_cycles >= 15:
         score += 2
     elif mw_cycles >= 7:
         score += 1
 
+    # NEU: Punkte-Leistung (Ø-Punkte pro Spiel)
+    if avg_points >= 100:
+        score += 3
+    elif avg_points >= 60:
+        score += 2
+    elif avg_points >= 30:
+        score += 1
+    elif 0 < avg_points < 15:
+        score -= 1
+
+    # Risiko
     if is_injured:
         score -= 3
     if has_negative_news:
@@ -326,6 +346,7 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     if opponents_blocked:
         score -= 1
 
+    # Label / max_bid
     if score >= 6 and not violates_my_limit and not is_injured and not has_negative_news:
         label = "TOP-KAUF"
         max_bid = int(mv * 1.15)
@@ -336,13 +357,19 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
         label = "RISKANT"
         max_bid = int(mv * 1.00)
 
+    # Nie unter Marktwert bieten
     max_bid = max(max_bid, mv)
 
+    # Begründungstext
     reasons = []
     if trend_flag == 1:
         reasons.append("positiver Marktwert-Trend")
     elif trend_flag == 2:
         reasons.append("fallender Marktwert-Trend")
+    if avg_points >= 60:
+        reasons.append(f"starke Punkteform (Ø {avg_points})")
+    elif 0 < avg_points < 15:
+        reasons.append(f"schwache Punkteform (Ø {avg_points})")
     if is_injured:
         reasons.append("Verletzungs-/Sperrrisiko (Kickbase)")
     if has_negative_news:
@@ -360,6 +387,8 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
         "max_bid": max_bid,
         "matched_news": matched_news[:3],
         "is_injured": is_injured,
+        "total_points": total_points,
+        "avg_points": avg_points,
     }
 
 
@@ -379,10 +408,11 @@ def get_llm_analysis(scored_players, cycles_info):
     prompt = f"""Du bist ein Kickbase-Experte. Ziel: Herbstmeister werden.
 Noch {cycles_info} Marktwert-Updates. Max 2 Spieler per Verein, nie unter Marktwert bieten.
 
-Hier sind die aktuellen Marktspieler mit Analyse-Daten:
+Hier sind die aktuellen Marktspieler mit Analyse-Daten (inkl. Gesamtpunkte und Ø-Punkte):
 {players_json}
 
 Gib fuer die 3-5 spannendsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko).
+Beruecksichtige dabei sowohl Marktwert-Potenzial als auch die Punkteform.
 Antworte in klarem Fliesstext ohne Markdown-Formatierung (keine Sternchen, keine Unterstriche, keine Rauten)."""
 
     try:
@@ -532,6 +562,7 @@ def main():
 
         msg += f"• <b>{esc(nachname)}</b> {trend} | 💰 {mw_str} € | ⏳ {time_str}\n"
         msg += f"  ✅ <b>Einschätzung:</b> {esc(eval_result['label'])} (Gebot mind./max.: {max_bid_str} €)\n"
+        msg += f"  📊 <b>Punkte:</b> {eval_result['total_points']} (Ø {eval_result['avg_points']})\n"
 
         if eval_result["reason"]:
             msg += f"  ℹ️ <b>Begründung:</b> {esc(eval_result['reason'])}\n"
@@ -550,6 +581,8 @@ def main():
             "name": nachname,
             "marktwert": p.get("mv", 0),
             "trend": "steigend" if p.get("mvt") == 1 else "fallend",
+            "gesamtpunkte": eval_result["total_points"],
+            "durchschnittspunkte": eval_result["avg_points"],
             "einschaetzung": eval_result["label"],
             "risiken": eval_result["reason"],
         })
