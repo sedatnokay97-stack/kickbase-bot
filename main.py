@@ -4,7 +4,7 @@ import xml.etree.ElementTree as ET
 import re
 import json
 from datetime import datetime, date
-from google import genai  # Neuer offizieller Google SDK Client
+from google import genai
 
 KB_EMAIL = os.environ.get("KB_EMAIL")
 KB_PASSWORD = os.environ.get("KB_PASSWORD")
@@ -157,7 +157,7 @@ Gib für die 3-5 spannendsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-1.5-flash',
             contents=prompt,
         )
         return response.text
