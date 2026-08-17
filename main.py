@@ -39,6 +39,7 @@ CONFIG = {
     "GEMINI_MAX_RETRIES": 1,
     "GEMINI_RETRY_DELAY": 5,
     "DEBUG_PLAYER_DETAIL": True,
+    "STARTELF_HEURISTIC_ENABLED": True,
 }
 
 NEWS_FEEDS = [
@@ -48,6 +49,37 @@ NEWS_FEEDS = [
 ]
 
 LIGAINSIDER_INJURY_URL = "https://www.ligainsider.de/bundesliga/verletzte-und-gesperrte-spieler/"
+
+# Kickbase-Teamname (klein geschrieben, Teilstring-Suche) -> LigaInsider Slug/ID fuer Saison 2026/27
+TEAM_LINEUP_SLUGS = {
+    "bayern": "fc-bayern-muenchen/1",
+    "werder": "sv-werder-bremen/2",
+    "frankfurt": "eintracht-frankfurt/3",
+    "leverkusen": "bayer-04-leverkusen/4",
+    "gladbach": "borussia-moenchengladbach/5",
+    "hamburg": "hamburger-sv/9",
+    "hoffenheim": "tsg-hoffenheim/10",
+    "stuttgart": "vfb-stuttgart/12",
+    "schalke": "fc-schalke-04/13",
+    "dortmund": "borussia-dortmund/14",
+    "k\u00f6ln": "1-fc-koeln/15",
+    "koeln": "1-fc-koeln/15",
+    "mainz": "1-fsv-mainz-05/17",
+    "freiburg": "sc-freiburg/18",
+    "augsburg": "fc-augsburg/21",
+    "union berlin": "1-fc-union-berlin/1246",
+    "paderborn": "sc-paderborn-07/1249",
+    "leipzig": "rb-leipzig/1311",
+    "elversberg": "sv-07-elversberg/1331",
+}
+
+LINEUP_SKIP_PHRASES = {
+    "auf dieser seite", "wir aktualisieren", "voraussichtliche aufstellung",
+    "spieler stand in der startelf", "spieler wurde eingewechselt",
+    "spieler sa\u00df auf der bank", "spieler war nicht im", "zur detailansicht",
+    "kader", "heimspiel gegen", "ausw\u00e4rtsspiel gegen", "torh\u00fcter",
+    "abwehrspieler", "mittelfeldspieler", "st\u00fcrmer", "legende",
+}
 
 NEWS_HEADERS = {
     "User-Agent": (
@@ -198,6 +230,68 @@ def get_my_budget(liga_id):
     return None
 
 
+def get_team_names(liga_id):
+    """Liest tid -> Vereinsname direkt aus der Kickbase-API (/leagues/{id}/teams)."""
+    try:
+        res = session.get(f"https://api.kickbase.com/v4/leagues/{liga_id}/teams", timeout=CONFIG["REQUEST_TIMEOUT"])
+        res.raise_for_status()
+        data = res.json()
+        items = data.get("it", data) if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            items = []
+        names = {}
+        for item in items:
+            tid = item.get("id") or item.get("tid")
+            name = item.get("name") or item.get("nm") or item.get("n")
+            if tid and name:
+                names[tid] = name
+        return names
+    except Exception as e:
+        print(f"Warnung: Team-Namen konnten nicht geladen werden: {e}")
+        return {}
+
+
+def find_ligainsider_slug(team_name):
+    if not team_name:
+        return None
+    name_lower = team_name.lower()
+    for key, slug in TEAM_LINEUP_SLUGS.items():
+        if key in name_lower:
+            return slug
+    return None
+
+
+def get_predicted_lineup(slug_id):
+    """
+    Scraped die voraussichtliche Startelf (naechstes Spiel) von LigaInsider.
+    Heuristik: erste bis zu 11 fettgedruckte Namen ohne bekannte Label-Phrasen.
+    Kein Ersatz fuer die exakte Ampelfarbe aus der Kickbase-App.
+    """
+    url = f"https://www.ligainsider.de/bundesliga/team/{slug_id}/"
+    names = []
+    try:
+        res = requests.get(url, headers=NEWS_HEADERS, timeout=CONFIG["REQUEST_TIMEOUT"])
+        res.raise_for_status()
+        res.encoding = "utf-8"
+        soup = BeautifulSoup(res.text, "html.parser")
+        for tag in soup.find_all(["b", "strong"]):
+            text = tag.get_text(strip=True)
+            if not text or len(text.split()) > 3:
+                continue
+            low = text.lower()
+            if any(p in low for p in LINEUP_SKIP_PHRASES):
+                continue
+            if any(ch.isdigit() for ch in text):
+                continue
+            if text not in names:
+                names.append(text)
+            if len(names) >= 11:
+                break
+    except Exception as e:
+        print(f"Warnung: Lineup-Vorschau fuer {slug_id} nicht ladbar: {e}")
+    return names
+
+
 def market_updates_until_first_matchday():
     now_utc = datetime.now(timezone.utc)
     matchday_start = datetime.combine(CONFIG["FIRST_MATCHDAY"], datetime.min.time(), tzinfo=timezone.utc)
@@ -252,7 +346,7 @@ def extract_points(p, p_detail):
     return total_points, avg_points
 
 
-def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles, my_budget):
+def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles, my_budget, lineup_names=None):
     lastname = p.get("n", "Unbekannt")
     mv = p.get("mv", 0)
     trend_flag = p.get("mvt")
@@ -273,6 +367,12 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     my_count_for_team = my_team_counts.get(tid, 0)
     violates_my_limit = my_count_for_team >= CONFIG["MAX_PER_TEAM"]
     opponents_blocked = tid in blocked_teams
+
+    predicted_starter = None
+    if lineup_names:
+        predicted_starter = any(
+            re.search(r'\b' + re.escape(lastname) + r'\b', n, re.IGNORECASE) for n in lineup_names
+        )
 
     score = 0
     if mv < 2_000_000:
@@ -301,6 +401,11 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     elif avg_points >= 30:
         score += 1
     elif 0 < avg_points < 15:
+        score -= 1
+
+    if predicted_starter is True:
+        score += 1
+    elif predicted_starter is False:
         score -= 1
 
     if is_injured:
@@ -338,6 +443,10 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
         reasons.append(f"starke Punkteform (Ø {avg_points})")
     elif 0 < avg_points < 15:
         reasons.append(f"schwache Punkteform (Ø {avg_points})")
+    if predicted_starter is True:
+        reasons.append("voraussichtlich in Startelf (LigaInsider, Heuristik)")
+    elif predicted_starter is False:
+        reasons.append("laut LigaInsider evtl. nicht in Startelf (Heuristik)")
     if is_injured:
         reasons.append("Verletzungs-/Sperrrisiko (Kickbase)")
     if has_negative_news:
@@ -360,6 +469,7 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
         "total_points": total_points,
         "avg_points": avg_points,
         "budget_exceeded": budget_exceeded,
+        "predicted_starter": predicted_starter,
     }
 
 
@@ -370,11 +480,11 @@ def get_llm_analysis(scored_players, cycles_info):
     prompt = f"""Du bist ein Kickbase-Experte. Ziel: Herbstmeister werden.
 Noch {cycles_info} Marktwert-Updates. Max 2 Spieler per Verein, nie unter Marktwert bieten.
 
-Hier sind die aktuellen Marktspieler mit Analyse-Daten (inkl. Gesamtpunkte und Ø-Punkte):
+Hier sind die aktuellen Marktspieler mit Analyse-Daten (inkl. Gesamtpunkte, Ø-Punkte und Startelf-Tipp):
 {players_json}
 
 Gib fuer die 3-5 spannendsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko).
-Beruecksichtige dabei sowohl Marktwert-Potenzial als auch die Punkteform.
+Beruecksichtige dabei sowohl Marktwert-Potenzial als auch die Punkteform und Startelf-Wahrscheinlichkeit.
 Antworte in klarem Fliesstext ohne Markdown-Formatierung (keine Sternchen, keine Unterstriche, keine Rauten)."""
 
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -471,6 +581,9 @@ def main():
     my_budget = get_my_budget(liga_id)
     mw_cycles = market_updates_until_first_matchday()
 
+    team_names = get_team_names(liga_id) if CONFIG["STARTELF_HEURISTIC_ENABLED"] else {}
+    lineup_cache = {}
+
     msg = "⚽ <b>Markt-Update: Kickbase Elite</b>\n\n"
 
     winter_warning = winter_reset_warning()
@@ -505,12 +618,28 @@ def main():
             except Exception as e:
                 print(f"Warnung: Detaildaten fuer {nachname} nicht geladen: {e}")
 
-        eval_result = evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles, my_budget)
+        lineup_names = None
+        if CONFIG["STARTELF_HEURISTIC_ENABLED"]:
+            team_name = team_names.get(p.get("tid"))
+            slug = find_ligainsider_slug(team_name)
+            if slug:
+                if slug not in lineup_cache:
+                    lineup_cache[slug] = get_predicted_lineup(slug)
+                lineup_names = lineup_cache[slug]
+
+        eval_result = evaluate_player(
+            p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles, my_budget, lineup_names
+        )
         max_bid_str = f"{eval_result['max_bid']:,}".replace(",", ".")
 
         msg += f"• <b>{esc(nachname)}</b> {trend} | 💰 {mw_str} € | ⏳ {time_str}\n"
         msg += f"  ✅ <b>Einschätzung:</b> {esc(eval_result['label'])} (Gebot mind./max.: {max_bid_str} €)\n"
         msg += f"  📊 <b>Punkte:</b> {eval_result['total_points']} (Ø {eval_result['avg_points']})\n"
+
+        if eval_result["predicted_starter"] is True:
+            msg += "  🏟️ <b>Startelf-Tipp:</b> Wahrscheinlich (LigaInsider)\n"
+        elif eval_result["predicted_starter"] is False:
+            msg += "  🪑 <b>Startelf-Tipp:</b> Fraglich/Bank (LigaInsider)\n"
 
         if eval_result["reason"]:
             msg += f"  ℹ️ <b>Begründung:</b> {esc(eval_result['reason'])}\n"
@@ -530,6 +659,7 @@ def main():
             "trend": "steigend" if p.get("mvt") == 1 else "fallend",
             "gesamtpunkte": eval_result["total_points"],
             "durchschnittspunkte": eval_result["avg_points"],
+            "startelf_tipp": eval_result["predicted_starter"],
             "einschaetzung": eval_result["label"],
             "risiken": eval_result["reason"],
         })
