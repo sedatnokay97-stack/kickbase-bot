@@ -155,7 +155,8 @@ Gib für die 3-5 spannendsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko
 Antworte DIREKT und in klarem Text. Verwende KEINE Markdown-Zeichen."""
 
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        # Hier ist die Änderung auf das stabile "latest" Modell!
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}"
         headers = {'Content-Type': 'application/json'}
         data = {
             "contents": [{"parts": [{"text": prompt}]}]
@@ -238,7 +239,7 @@ def main():
 
         llm_text = get_llm_analysis(scored_players, mw_cycles)
         
-        # NEU: Die "Waschanlage" für den KI-Text! Entfernt alle Sternchen, Unterstriche und Rauten.
+        # Die "Waschanlage" für den KI-Text (funktioniert super!)
         llm_text_clean = llm_text.replace("*", "").replace("_", "").replace("#", "").replace("`", "")
         
         msg += "🤖 *KI-Manager-Einschätzung:*\n" + llm_text_clean
