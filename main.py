@@ -3,6 +3,7 @@ import sys
 import re
 import json
 import html
+import time
 import traceback
 from datetime import datetime, timezone, date
 import xml.etree.ElementTree as ET
@@ -28,11 +29,15 @@ REQUIRED_SECRETS = {
 CONFIG = {
     "MAX_PER_TEAM": 2,
     "FIRST_MATCHDAY": date(2026, 8, 28),
+    "WINTER_RESET_DATE": date(2027, 1, 5),
+    "WINTER_WARNING_DAYS": 14,
     "MW_UPDATE_HOUR_UTC": 20,
     "PLAYERS_TO_SHOW": 15,
     "REQUEST_TIMEOUT": 10,
     "TELEGRAM_MAX_LEN": 3900,
     "GEMINI_MODEL": "gemini-3.7-flash",
+    "GEMINI_MAX_RETRIES": 1,
+    "GEMINI_RETRY_DELAY": 5,
     "DEBUG_PLAYER_DETAIL": True,
 }
 
@@ -170,6 +175,29 @@ def get_my_team_counts(liga_id, my_manager_id):
     return count_by_team(my_squad)
 
 
+def get_my_budget(liga_id):
+    """Liest den verfuegbaren Kontostand ueber /me/budget aus, mit Fallback auf /me."""
+    try:
+        res = session.get(f"https://api.kickbase.com/v4/leagues/{liga_id}/me/budget", timeout=CONFIG["REQUEST_TIMEOUT"])
+        res.raise_for_status()
+        data = res.json()
+        for key in ["budget", "b", "amount"]:
+            if key in data and data[key] is not None:
+                return data[key]
+    except Exception as e:
+        print(f"Warnung: /me/budget nicht verfuegbar, versuche Fallback: {e}")
+    try:
+        res = session.get(f"https://api.kickbase.com/v4/leagues/{liga_id}/me", timeout=CONFIG["REQUEST_TIMEOUT"])
+        res.raise_for_status()
+        data = res.json()
+        for key in ["budget", "b", "amount"]:
+            if key in data and data[key] is not None:
+                return data[key]
+    except Exception as e:
+        print(f"Warnung: Kontostand konnte nicht geladen werden: {e}")
+    return None
+
+
 def market_updates_until_first_matchday():
     now_utc = datetime.now(timezone.utc)
     matchday_start = datetime.combine(CONFIG["FIRST_MATCHDAY"], datetime.min.time(), tzinfo=timezone.utc)
@@ -178,6 +206,19 @@ def market_updates_until_first_matchday():
     today_update = now_utc.replace(hour=CONFIG["MW_UPDATE_HOUR_UTC"], minute=0, second=0, microsecond=0)
     remaining_days = (CONFIG["FIRST_MATCHDAY"] - now_utc.date()).days
     return remaining_days if now_utc < today_update else max(0, remaining_days - 1)
+
+
+def winter_reset_warning():
+    """Gibt eine Warnmeldung zurueck, falls das Winter-Reset-Datum bald erreicht ist, sonst None."""
+    today = datetime.now(timezone.utc).date()
+    reset_date = CONFIG["WINTER_RESET_DATE"]
+    days_left = (reset_date - today).days
+    if 0 <= days_left <= CONFIG["WINTER_WARNING_DAYS"]:
+        return (
+            f"⚠️ Nur noch {days_left} Tage bis zum Winter-Reset ({reset_date.strftime('%d.%m.%Y')}). "
+            "Denk daran, Spieler rechtzeitig zu verkaufen (Regel: bis auf 1 Spieler abstossen)."
+        )
+    return None
 
 
 def match_news_for_player(lastname, news_headlines):
@@ -211,7 +252,7 @@ def extract_points(p, p_detail):
     return total_points, avg_points
 
 
-def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles):
+def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles, my_budget):
     lastname = p.get("n", "Unbekannt")
     mv = p.get("mv", 0)
     trend_flag = p.get("mvt")
@@ -283,6 +324,11 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
 
     max_bid = max(max_bid, mv)
 
+    budget_exceeded = False
+    if my_budget is not None and max_bid > my_budget:
+        budget_exceeded = True
+        max_bid = min(max_bid, my_budget) if my_budget >= mv else max_bid
+
     reasons = []
     if trend_flag == 1:
         reasons.append("positiver Marktwert-Trend")
@@ -302,6 +348,8 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
         reasons.append("überschreitet 2-Spieler-Regel")
     if opponents_blocked:
         reasons.append("Gegner haben den Verein blockiert")
+    if budget_exceeded:
+        reasons.append("Gebot uebersteigt dein verfuegbares Budget")
 
     return {
         "label": label,
@@ -311,6 +359,7 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
         "is_injured": is_injured,
         "total_points": total_points,
         "avg_points": avg_points,
+        "budget_exceeded": budget_exceeded,
     }
 
 
@@ -327,22 +376,31 @@ Hier sind die aktuellen Marktspieler mit Analyse-Daten (inkl. Gesamtpunkte und �
 Gib fuer die 3-5 spannendsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko).
 Beruecksichtige dabei sowohl Marktwert-Potenzial als auch die Punkteform.
 Antworte in klarem Fliesstext ohne Markdown-Formatierung (keine Sternchen, keine Unterstriche, keine Rauten)."""
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model=CONFIG["GEMINI_MODEL"],
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.4,
-                max_output_tokens=700,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            ),
-        )
-        text = (response.text or "").strip()
-        return text if text else "KI hat keine Analyse geliefert."
-    except Exception as e:
-        print(f"Warnung: Gemini-Aufruf fehlgeschlagen: {e}")
-        return f"KI-Analyse aktuell nicht verfuegbar ({type(e).__name__})."
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    attempts = CONFIG["GEMINI_MAX_RETRIES"] + 1
+    last_error = None
+
+    for attempt in range(attempts):
+        try:
+            response = client.models.generate_content(
+                model=CONFIG["GEMINI_MODEL"],
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.4,
+                    max_output_tokens=700,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                ),
+            )
+            text = (response.text or "").strip()
+            return text if text else "KI hat keine Analyse geliefert."
+        except Exception as e:
+            last_error = e
+            print(f"Warnung: Gemini-Aufruf fehlgeschlagen (Versuch {attempt + 1}/{attempts}): {e}")
+            if attempt < attempts - 1:
+                time.sleep(CONFIG["GEMINI_RETRY_DELAY"])
+
+    return f"KI-Analyse aktuell nicht verfuegbar ({type(last_error).__name__})."
 
 
 def send_telegram_messages(full_text):
@@ -410,9 +468,19 @@ def main():
 
     blocked_teams = build_blocked_teams(liga_id, ranking_res, my_manager_id)
     my_team_counts = get_my_team_counts(liga_id, my_manager_id)
+    my_budget = get_my_budget(liga_id)
     mw_cycles = market_updates_until_first_matchday()
 
     msg = "⚽ <b>Markt-Update: Kickbase Elite</b>\n\n"
+
+    winter_warning = winter_reset_warning()
+    if winter_warning:
+        msg += f"{esc(winter_warning)}\n\n"
+
+    if my_budget is not None:
+        budget_str = f"{my_budget:,}".replace(",", ".")
+        msg += f"💳 <b>Verfuegbares Budget:</b> {budget_str} €\n\n"
+
     scored_players = []
     debug_done = False
 
@@ -437,7 +505,7 @@ def main():
             except Exception as e:
                 print(f"Warnung: Detaildaten fuer {nachname} nicht geladen: {e}")
 
-        eval_result = evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles)
+        eval_result = evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles, my_budget)
         max_bid_str = f"{eval_result['max_bid']:,}".replace(",", ".")
 
         msg += f"• <b>{esc(nachname)}</b> {trend} | 💰 {mw_str} € | ⏳ {time_str}\n"
@@ -448,6 +516,8 @@ def main():
             msg += f"  ℹ️ <b>Begründung:</b> {esc(eval_result['reason'])}\n"
         if eval_result["is_injured"]:
             msg += "  🩹 <b>Status: Verletzt / Reha / Gesperrt</b>\n"
+        if eval_result["budget_exceeded"]:
+            msg += "  🚫 <b>Achtung: Gebot uebersteigt dein Budget</b>\n"
         if p.get("tid") in blocked_teams:
             msg += f"  🚫 <b>Sperre (Gegner):</b> {esc(', '.join(blocked_teams[p.get('tid')]))}\n"
         for h in eval_result["matched_news"]:
