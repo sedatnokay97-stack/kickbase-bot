@@ -588,8 +588,10 @@ def get_llm_analysis(scored_players, cycles):
 
 
 def send_telegram_messages(message):
-       if CONFIG["DRY_RUN"]:
-        message += "🧪 <b>DRY_RUN aktiv</b> – Versand und History-Speicherung sind deaktiviert.\n\n"
+    if CONFIG["DRY_RUN"]:
+        print("DRY_RUN aktiv – Telegram-Nachricht wird nicht gesendet.")
+        print(message)
+        return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     chunks, current = [], ""
     for line in message.split("\n"):
@@ -651,9 +653,7 @@ def main():
 
     message = "⚽ <b>Markt-Update: Kickbase Elite</b>\n\n"
     if budget is not None:
-      exs = player.get("exs", 0)
-time_str = f"{exs//3600}h {(exs%3600)//60}m" if exs > 0 else "Abgelaufen"
-message += f"-  <b>{esc(name)}</b> {trend} | 💰 {mv:,} EUR | ⏳ {time_str}\n".replace(",", ".")
+        message += f"💳 <b>Verfuegbares Budget:</b> {budget:,} EUR\n\n".replace(",", ".")
     if CONFIG["DRY_RUN"]:
         message += "🧪 <b>DRY_RUN aktiv</b> – Versand und History-Speicherung sind deaktiviert.\n\n"
 
@@ -681,7 +681,9 @@ message += f"-  <b>{esc(name)}</b> {trend} | 💰 {mv:,} EUR | ⏳ {time_str}\n"
 
         name, mv = player.get("n", "Unbekannt"), player.get("mv", 0)
         trend = "📈" if player.get("mvt") == 1 else "📉" if player.get("mvt") == 2 else "➖"
-        message += f"• <b>{esc(name)}</b> {trend} | 💰 {mv:,} EUR\n".replace(",", ".")
+        exs = player.get("exs", 0)
+        time_str = f"{exs//3600}h {(exs%3600)//60}m" if exs > 0 else "Abgelaufen"
+        message += f"• <b>{esc(name)}</b> {trend} | 💰 {mv:,} EUR | ⏳ {time_str}\n".replace(",", ".")
         message += f"  ✅ <b>Einschaetzung:</b> {esc(result['label'])} (Max. Gebot: {result['max_bid']:,} EUR)\n".replace(",", ".")
         message += f"  📊 <b>Punkte:</b> {result['total_points']} (Durchschnitt {result['avg_points']})\n"
         message += f"  ℹ️ <b>Begruendung:</b> {esc(result['reason'])}\n"
