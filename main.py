@@ -40,17 +40,23 @@ CONFIG = {
 # kein Restprogramm (kein Absturz, das Feld bleibt einfach leer).
 KICKBASE_TID_TO_TEAM = {
     "2": "bayern",
+    "3": "dortmund",
     "4": "frankfurt",
     "5": "freiburg",
+    "6": "hamburg",
     "7": "leverkusen",
+    "8": "schalke",
     "9": "stuttgart",
     "10": "werder",
+    "13": "augsburg",
     "14": "hoffenheim",
     "15": "gladbach",
     "18": "mainz",
     "28": "koeln",
+    "29": "paderborn",
     "40": "union berlin",
     "43": "leipzig",
+    "77": "elversberg",
 }
 
 TEAM_STRENGTH_LAST_SEASON = {
