@@ -155,7 +155,8 @@ Gib für die 3-5 spannendsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko
 WICHTIG: Antworte in absolutem Reintext! Verwende KEINE Sternchen (*), keine Unterstriche (_) und keine Rauten (#). Nutze als Aufzählungszeichen nur normale Bindestriche (-). Direkter Einstieg ohne Floskeln."""
 
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        # Hier ist die Änderung: gemini-2.0-flash statt 1.5-flash!
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
         headers = {'Content-Type': 'application/json'}
         data = {
             "contents": [{"parts": [{"text": prompt}]}]
@@ -164,7 +165,7 @@ WICHTIG: Antworte in absolutem Reintext! Verwende KEINE Sternchen (*), keine Unt
         response = requests.post(url, headers=headers, json=data)
         
         if response.status_code != 200:
-            return f"❌ KI-Fehler: HTTP {response.status_code}"
+            return f"❌ KI-Fehler: HTTP {response.status_code} - {response.text}"
             
         result = response.json()
         return result['candidates'][0]['content']['parts'][0]['text']
