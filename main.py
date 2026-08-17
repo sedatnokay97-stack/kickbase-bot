@@ -37,7 +37,7 @@ CONFIG = {
     "MW_UPDATE_HOUR_UTC": 20,
     "PLAYERS_TO_SHOW": 15,
     "REQUEST_TIMEOUT": 10,
-    "TELEGRAM_MAX_LEN": 3900,
+    "TELEGRAM_MAX_LEN": 5000,
     "GEMINI_MODEL": "gemini-3.6-flash",
     "GEMINI_FALLBACK_MODEL": "gemini-2.0-flash",
     "GEMINI_MAX_RETRIES": 1,
@@ -653,7 +653,9 @@ def main():
 
     message = "⚽ <b>Markt-Update: Kickbase Elite</b>\n\n"
     if budget is not None:
-        message += f"💳 <b>Verfuegbares Budget:</b> {budget:,} EUR\n\n".replace(",", ".")
+      exs = player.get("exs", 0)
+time_str = f"{exs//3600}h {(exs%3600)//60}m" if exs > 0 else "Abgelaufen"
+message += f"-  <b>{esc(name)}</b> {trend} | 💰 {mv:,} EUR | ⏳ {time_str}\n".replace(",", ".")
     if CONFIG["DRY_RUN"]:
         message += "🧪 <b>DRY_RUN aktiv</b> – Versand und History-Speicherung sind deaktiviert.\n\n"
 
