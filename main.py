@@ -11,7 +11,7 @@ KB_PASSWORD = os.environ.get("KB_PASSWORD")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-1.5-flash"
 
 # Konfiguration deiner Liga-Regeln und Zeitlogik
 CONFIG = {
