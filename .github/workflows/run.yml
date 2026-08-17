@@ -3,7 +3,7 @@ name: Kickbase Bot Execution
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */8 * * *'  # Alle 8 Stunden ausführen
+    - cron: '0 */8 * * *'
 
 jobs:
   run-bot:
@@ -19,7 +19,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4 google-genai
+          pip install curl-cffi beautifulsoup4 google-genai
 
       - name: Run Kickbase bot
         env:
