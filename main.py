@@ -460,10 +460,10 @@ def evaluate_player(player, history, starters, injured_list, my_team_counts=None
     budget_exceeded = my_budget is not None and max_bid > my_budget
 
     recommendation = "ABWARTEN"
-    if raw_profit > 800_000 and not is_injured:
-    recommendation = "KAUF JETZT (High Profit)"
-    elif raw_profit > 150_000:
-    recommendation = "BEOBACHTEN"
+    if raw_profit > 1_500_000 and not is_injured:
+        recommendation = "KAUF JETZT (High Profit)"
+    elif daily_trend > 0:
+        recommendation = "BEOBACHTEN"
 
     if is_injured:
         recommendation = "RISIKO (Verletzt/Angeschlagen)"
@@ -606,8 +606,8 @@ def main():
     # === NEUER PRIORISIERTER REPORT ===
     evaluated_list.sort(key=lambda x: x["exp_profit"], reverse=True)
 
-   top_chancen = [p for p in evaluated_list if p["exp_profit"] > 800_000 and not p["is_injured"] and not p["violates_my_limit"]]
-    beobachten = [p for p in evaluated_list if p["exp_profit"] > 150_000 and p["exp_profit"] <= 800_000 and not p["is_injured"] and not p["violates_my_limit"]]
+    top_chancen = [p for p in evaluated_list if p["recommendation"].startswith("KAUF JETZT")]
+    beobachten = [p for p in evaluated_list if p["recommendation"] == "BEOBACHTEN" and p["exp_profit"] > 300_000]
     risiken = [p for p in evaluated_list if "BLOCKIERT" in p["recommendation"] or "RISIKO" in p["recommendation"] or p["budget_exceeded"]]
 
     report_lines = [
@@ -668,3 +668,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
