@@ -13,7 +13,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # FIX 1: Wir zwingen Google, das garantiert funktionierende, neueste Flash-Modell zu nehmen
-GEMINI_MODEL = "gemini-1.5-flash-latest"
+GEMINI_MODEL = "gemini-pro"
 
 CONFIG = {
     "MAX_PER_TEAM": 2,
