@@ -32,26 +32,36 @@ CONFIG = {
 def kickbase_login():
     """ Loggt den Bot bei Kickbase v4 ein und liefert Token + Liga-ID. """
     if not KB_EMAIL or not KB_PASSWORD:
-        raise ValueError("❌ KB_EMAIL oder KB_PASSWORD fehlt in den Repository Secrets!")
+        raise ValueError("❌ KB_EMAIL oder KB_PASSWORD fehlt in den Environment Variables.")
     
     url = "https://api.kickbase.com/v4/user/login"
-    payload = {"email": KB_EMAIL.strip(), "password": KB_PASSWORD.strip()}
+    payload = {
+        "email": KB_EMAIL.strip(),
+        "password": KB_PASSWORD.strip(),
+        "extLogin": False
+    }
     headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "Content-Type": "application/json; charset=utf-8",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://play.kickbase.com",
+        "Referer": "https://play.kickbase.com/"
     }
     
     resp = requests.post(url, json=payload, headers=headers, timeout=CONFIG["REQUEST_TIMEOUT"])
-    if resp.status_code == 401:
-        raise ValueError("❌ Login fehlgeschlagen (401 Unauthorized): Zugangsdaten prüfen!")
-    resp.raise_for_status()
     
+    print(f"DEBUG API HTTP Status: {resp.status_code}")
+    print(f"DEBUG API Response Body: {resp.text}")
+    
+    if not resp.ok:
+        raise ValueError(f"❌ Kickbase API Login-Fehler (HTTP {resp.status_code}): {resp.text}")
+        
     data = resp.json()
     token = data.get("token")
     leagues = data.get("leagues", [])
     
     if not token or not leagues:
-        raise ValueError("❌ Login-Antwort unvollständig (kein Token/keine Liga).")
+        raise ValueError("❌ Login-Antwort unvollständig (kein Token oder keine Liga erhalten).")
     
     league_id = leagues[0].get("id")
     print(f"✅ Kickbase Login erfolgreich. Liga-ID: {league_id}")
@@ -60,7 +70,12 @@ def kickbase_login():
 def get_market_players(token, league_id):
     """ Holt alle aktuellen Transfermarkt-Spieler der Liga. """
     url = f"https://api.kickbase.com/v4/leagues/{league_id}/market"
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Origin": "https://play.kickbase.com",
+        "Referer": "https://play.kickbase.com/"
+    }
     
     resp = requests.get(url, headers=headers, timeout=CONFIG["REQUEST_TIMEOUT"])
     resp.raise_for_status()
@@ -97,14 +112,14 @@ def get_ligainsider_injuries():
             soup = BeautifulSoup(resp.text, "html.parser")
             for tag in soup.find_all(["span", "td", "a"]):
                 text = tag.text.strip()
-                if len(text) > 3 and len(text) < 30:
+                if 3 < len(text) < 30:
                     injured.add(text.lower())
     except Exception as e:
         print(f"⚠️ Verletzungs-Scraping-Hinweis: {e}")
     return injured
 
 # ==========================================
-# KNOTEN 3: DATA CONSOLIDATION & PROGNOSE ENGINE
+# KNOTEN 3: HISTORY & PROGNOSE ENGINE
 # ==========================================
 def load_history():
     if os.path.exists(CONFIG["HISTORY_FILE"]):
