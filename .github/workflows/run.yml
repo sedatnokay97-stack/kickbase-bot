@@ -3,7 +3,7 @@ name: Kickbase 8h Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */8 * * *'   # alle 8 Stunden
+    - cron: '0 */8 * * *'
 
 jobs:
   run-bot:
