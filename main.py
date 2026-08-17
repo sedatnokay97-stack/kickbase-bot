@@ -151,22 +151,20 @@ Noch {cycles_info} Marktwert-Updates. Max 2 Spieler pro Verein, nie unter Marktw
 Hier sind die aktuellen Marktspieler mit Analyse-Daten:
 {players_json}
 
-Gib für die 3-5 spannendsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko). Antworte im Telegram-Markdown mit Bulletpoints. Keine Einleitung, direkt zur Sache."""
+Gib für die 3-5 spannendsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko). 
+WICHTIG: Antworte in absolutem Reintext! Verwende KEINE Sternchen (*), keine Unterstriche (_) und keine Rauten (#). Nutze als Aufzählungszeichen nur normale Bindestriche (-). Direkter Einstieg ohne Floskeln."""
 
     try:
-        # PLAN B: Direkter HTTP REST API Call ohne Google SDK
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         headers = {'Content-Type': 'application/json'}
         data = {
-            "contents": [{
-                "parts": [{"text": prompt}]
-            }]
+            "contents": [{"parts": [{"text": prompt}]}]
         }
         
         response = requests.post(url, headers=headers, json=data)
         
         if response.status_code != 200:
-            return f"❌ KI-Fehler: HTTP {response.status_code} - {response.text}"
+            return f"❌ KI-Fehler: HTTP {response.status_code}"
             
         result = response.json()
         return result['candidates'][0]['content']['parts'][0]['text']
@@ -241,7 +239,14 @@ def main():
         llm_text = get_llm_analysis(scored_players, mw_cycles)
         msg += "🤖 *KI-Manager-Einschätzung:*\n" + llm_text
 
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+        # Senden mit Markdown
+        tg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        response = requests.post(tg_url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+        
+        # Fallback: Falls Telegram wegen der Markdown-Formatierung streikt, unformatiert senden
+        if response.status_code != 200:
+            print(f"Markdown-Fehler: {response.text}")
+            requests.post(tg_url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
 
     except Exception as e:
         print(f"Fehler: {e}")
