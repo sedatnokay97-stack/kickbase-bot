@@ -4,7 +4,6 @@ import xml.etree.ElementTree as ET
 import re
 import json
 from datetime import datetime, date
-from google import genai
 
 KB_EMAIL = os.environ.get("KB_EMAIL")
 KB_PASSWORD = os.environ.get("KB_PASSWORD")
@@ -155,12 +154,22 @@ Hier sind die aktuellen Marktspieler mit Analyse-Daten:
 Gib für die 3-5 spannendsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko). Antworte im Telegram-Markdown mit Bulletpoints. Keine Einleitung, direkt zur Sache."""
 
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model='gemini-2.0-flash',
-            contents=prompt,
-        )
-        return response.text
+        # PLAN B: Direkter HTTP REST API Call ohne Google SDK
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        headers = {'Content-Type': 'application/json'}
+        data = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }]
+        }
+        
+        response = requests.post(url, headers=headers, json=data)
+        
+        if response.status_code != 200:
+            return f"❌ KI-Fehler: HTTP {response.status_code} - {response.text}"
+            
+        result = response.json()
+        return result['candidates'][0]['content']['parts'][0]['text']
     except Exception as e:
         return f"❌ KI-Fehler: {e}"
 
