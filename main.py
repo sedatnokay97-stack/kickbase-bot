@@ -519,9 +519,26 @@ def main():
             print("MYELEVEN Top-Level-Keys:", list(myeleven_data.keys()))
             if lp_list:
                 print(
-                    "MYELEVEN erster Spieler (volle Rohdaten):",
-                    json.dumps(lp_list[0], indent=2, ensure_ascii=False),
+                    print(
+                "MYELEVEN erster Spieler (lp, volle Rohdaten):",
+                json.dumps(lp_list[0], indent=2, ensure_ascii=False),
+            )
+
+            nlp_list = myeleven_data.get("nlp", [])
+            print("MYELEVEN Anzahl nlp (nicht gesetzt/unsicher):", len(nlp_list))
+            if nlp_list:
+                print(
+                    "MYELEVEN erster Spieler (nlp, volle Rohdaten):",
+                    json.dumps(nlp_list[0], indent=2, ensure_ascii=False),
                 )
+
+            print("MYELEVEN Top-Level-Werte p/pa/lpc/clpc/cpte:", {
+                "p": myeleven_data.get("p"),
+                "pa": myeleven_data.get("pa"),
+                "lpc": myeleven_data.get("lpc"),
+                "clpc": myeleven_data.get("clpc"),
+                "cpte": myeleven_data.get("cpte"),
+            })
         except Exception as e:
             print("Fehler myeleven:", e)
     else:
