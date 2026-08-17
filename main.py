@@ -12,10 +12,6 @@ from google import genai
 from google.genai import types
 from bs4 import BeautifulSoup
 
-# ---------------------------------------------------------------------------
-# Konfiguration
-# ---------------------------------------------------------------------------
-
 KB_EMAIL = os.environ.get("KB_EMAIL")
 KB_PASSWORD = os.environ.get("KB_PASSWORD")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -37,7 +33,7 @@ CONFIG = {
     "REQUEST_TIMEOUT": 10,
     "TELEGRAM_MAX_LEN": 3900,
     "GEMINI_MODEL": "gemini-3.7-flash",
-    "DEBUG_PLAYER_DETAIL": True,  # einmalig Rohdaten des ersten Spielers loggen
+    "DEBUG_PLAYER_DETAIL": True,
 }
 
 NEWS_FEEDS = [
@@ -66,24 +62,14 @@ def esc(value) -> str:
     return html.escape(str(value), quote=False)
 
 
-# ---------------------------------------------------------------------------
-# News-Datenquellen
-# ---------------------------------------------------------------------------
-
 def get_ligainsider_injury_news():
     headlines = []
     skip_labels = {"spieler", "grund", "letzte news zu diesem status", "fehlt seit:", "fehlt seit"}
-
     try:
-        res = requests.get(
-            LIGAINSIDER_INJURY_URL,
-            headers=NEWS_HEADERS,
-            timeout=CONFIG["REQUEST_TIMEOUT"],
-        )
+        res = requests.get(LIGAINSIDER_INJURY_URL, headers=NEWS_HEADERS, timeout=CONFIG["REQUEST_TIMEOUT"])
         res.raise_for_status()
         res.encoding = "utf-8"
         soup = BeautifulSoup(res.text, "html.parser")
-
         bold_tags = soup.find_all(["b", "strong"])
         for tag in bold_tags:
             name = tag.get_text(strip=True)
@@ -91,21 +77,17 @@ def get_ligainsider_injury_news():
                 continue
             if len(name.split()) < 2:
                 continue
-
             parent = tag.find_parent(["div", "li", "tr", "p"]) or tag.parent
             full_text = parent.get_text(" ", strip=True)
             if full_text:
                 headlines.append(full_text)
-
     except Exception as e:
         print(f"Warnung: LigaInsider-Verletztenseite konnte nicht geladen werden: {e}")
-
     return headlines
 
 
 def get_news():
     headlines = []
-
     for url in NEWS_FEEDS:
         try:
             res = requests.get(url, headers=NEWS_HEADERS, timeout=CONFIG["REQUEST_TIMEOUT"])
@@ -116,33 +98,25 @@ def get_news():
             except ET.ParseError:
                 print(f"Warnung: RSS-Feed konnte nicht geparst werden: {url}")
                 continue
-
             for item in root.findall(".//item"):
                 title_el = item.find("title")
                 if title_el is not None and title_el.text:
                     headlines.append(title_el.text)
         except Exception as e:
             print(f"Warnung: News-Feed konnte nicht geladen werden: {url} -> {e}")
-
     try:
         li_headlines = get_ligainsider_injury_news()
         headlines.extend(li_headlines)
     except Exception as e:
         print(f"Warnung: LigaInsider-News konnten nicht per HTML-Scraping geladen werden: {e}")
-
     unique = []
     seen = set()
     for h in headlines:
         if h not in seen:
             seen.add(h)
             unique.append(h)
-
     return unique
 
-
-# ---------------------------------------------------------------------------
-# Kickbase-Kader / Liga
-# ---------------------------------------------------------------------------
 
 def count_by_team(squad_items):
     counts = {}
@@ -158,12 +132,10 @@ def build_blocked_teams(liga_id, ranking_res, my_manager_id):
     blocked_teams = {}
     for user in ranking_res.get("users", []):
         opponent_manager_id = user.get("mid") or user.get("id")
-
         if opponent_manager_id == my_manager_id:
             continue
         if not opponent_manager_id:
             continue
-
         try:
             res = session.get(
                 f"https://api.kickbase.com/v4/leagues/{liga_id}/managers/{opponent_manager_id}/squad",
@@ -174,7 +146,6 @@ def build_blocked_teams(liga_id, ranking_res, my_manager_id):
         except Exception as e:
             print(f"Warnung: Squad von {user.get('name')} konnte nicht geladen werden: {e}")
             squad = []
-
         counts = count_by_team(squad)
         for tid, count in counts.items():
             if count >= CONFIG["MAX_PER_TEAM"]:
@@ -186,7 +157,6 @@ def get_my_team_counts(liga_id, my_manager_id):
     if not my_manager_id:
         print("Warnung: my_manager_id ist None – eigener Kader kann nicht geladen werden.")
         return {}
-
     try:
         res = session.get(
             f"https://api.kickbase.com/v4/leagues/{liga_id}/managers/{my_manager_id}/squad",
@@ -200,21 +170,12 @@ def get_my_team_counts(liga_id, my_manager_id):
     return count_by_team(my_squad)
 
 
-# ---------------------------------------------------------------------------
-# Zeitlogik & News-Matching
-# ---------------------------------------------------------------------------
-
 def market_updates_until_first_matchday():
     now_utc = datetime.now(timezone.utc)
-    matchday_start = datetime.combine(
-        CONFIG["FIRST_MATCHDAY"], datetime.min.time(), tzinfo=timezone.utc
-    )
+    matchday_start = datetime.combine(CONFIG["FIRST_MATCHDAY"], datetime.min.time(), tzinfo=timezone.utc)
     if now_utc >= matchday_start:
         return 0
-
-    today_update = now_utc.replace(
-        hour=CONFIG["MW_UPDATE_HOUR_UTC"], minute=0, second=0, microsecond=0
-    )
+    today_update = now_utc.replace(hour=CONFIG["MW_UPDATE_HOUR_UTC"], minute=0, second=0, microsecond=0)
     remaining_days = (CONFIG["FIRST_MATCHDAY"] - now_utc.date()).days
     return remaining_days if now_utc < today_update else max(0, remaining_days - 1)
 
@@ -227,24 +188,26 @@ def match_news_for_player(lastname, news_headlines):
     return matched
 
 
-# ---------------------------------------------------------------------------
-# Bewertung
-# ---------------------------------------------------------------------------
-
-def extract_points(p_detail):
-    """
-    Liest Gesamtpunkte/Ø-Punkte robust aus, da der Feldname je nach
-    Kickbase-API-Version variieren kann (p/ap, tp/avp, points/averagePoints...).
-    """
-    if not p_detail:
-        return 0, 0
-
-    total_candidates = ["p", "tp", "points", "totalPoints", "sp"]
-    avg_candidates = ["ap", "avp", "avgPoints", "averagePoints", "sap"]
-
-    total_points = next((p_detail[k] for k in total_candidates if k in p_detail and p_detail[k] is not None), 0)
-    avg_points = next((p_detail[k] for k in avg_candidates if k in p_detail and p_detail[k] is not None), 0)
-
+def extract_points(p, p_detail):
+    total_candidates = ["totalPoints", "p", "tp", "points", "sp"]
+    avg_candidates = ["averagePoints", "ap", "avp", "avgPoints", "sap"]
+    sources = [p or {}, p_detail or {}]
+    total_points = 0
+    avg_points = 0
+    for src in sources:
+        for k in total_candidates:
+            if k in src and src[k] is not None:
+                total_points = src[k]
+                break
+        if total_points:
+            break
+    for src in sources:
+        for k in avg_candidates:
+            if k in src and src[k] is not None:
+                avg_points = src[k]
+                break
+        if avg_points:
+            break
     return total_points, avg_points
 
 
@@ -258,15 +221,11 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     st_detail = str(p_detail.get("status", p_detail.get("st", "0")) if p_detail else "0")
     is_injured = st_market in ["1", "2", "4", "8"] or st_detail in ["1", "2", "4", "8"]
 
-    total_points, avg_points = extract_points(p_detail)
+    total_points, avg_points = extract_points(p, p_detail)
 
     matched_news = match_news_for_player(lastname, news_headlines)
     has_negative_news = any(
-        re.search(
-            r"(verletzt|muskul|ausfall|gesperrt|rot|kreuzband|bruch|reha|trainingsrückstand)",
-            h,
-            re.IGNORECASE,
-        )
+        re.search(r"(verletzt|muskul|ausfall|gesperrt|rot|kreuzband|bruch|reha|trainingsrückstand)", h, re.IGNORECASE)
         for h in matched_news
     )
 
@@ -275,7 +234,6 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     opponents_blocked = tid in blocked_teams
 
     score = 0
-
     if mv < 2_000_000:
         score += 1
     elif mv < 6_000_000:
@@ -356,14 +314,9 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     }
 
 
-# ---------------------------------------------------------------------------
-# Gemini / LLM
-# ---------------------------------------------------------------------------
-
 def get_llm_analysis(scored_players, cycles_info):
     if not GEMINI_API_KEY:
         return "FEHLER: Kein GEMINI_API_KEY gefunden!"
-
     players_json = json.dumps(scored_players, ensure_ascii=False, indent=2)
     prompt = f"""Du bist ein Kickbase-Experte. Ziel: Herbstmeister werden.
 Noch {cycles_info} Marktwert-Updates. Max 2 Spieler per Verein, nie unter Marktwert bieten.
@@ -374,22 +327,17 @@ Hier sind die aktuellen Marktspieler mit Analyse-Daten (inkl. Gesamtpunkte und �
 Gib fuer die 3-5 spannendsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko).
 Beruecksichtige dabei sowohl Marktwert-Potenzial als auch die Punkteform.
 Antworte in klarem Fliesstext ohne Markdown-Formatierung (keine Sternchen, keine Unterstriche, keine Rauten)."""
-
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-
         response = client.models.generate_content(
             model=CONFIG["GEMINI_MODEL"],
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.4,
                 max_output_tokens=700,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                    disable=True
-                ),
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             ),
         )
-
         text = (response.text or "").strip()
         return text if text else "KI hat keine Analyse geliefert."
     except Exception as e:
@@ -397,14 +345,9 @@ Antworte in klarem Fliesstext ohne Markdown-Formatierung (keine Sternchen, keine
         return f"KI-Analyse aktuell nicht verfuegbar ({type(e).__name__})."
 
 
-# ---------------------------------------------------------------------------
-# Telegram
-# ---------------------------------------------------------------------------
-
 def send_telegram_messages(full_text):
     tg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     limit = CONFIG["TELEGRAM_MAX_LEN"]
-
     chunks = []
     current = ""
     for line in full_text.split("\n"):
@@ -415,7 +358,6 @@ def send_telegram_messages(full_text):
             current = f"{current}\n{line}" if current else line
     if current:
         chunks.append(current)
-
     for chunk in chunks:
         try:
             resp = requests.post(
@@ -426,18 +368,10 @@ def send_telegram_messages(full_text):
             if resp.status_code != 200:
                 print(f"Warnung: Telegram HTML-Versand fehlgeschlagen ({resp.status_code}): {resp.text}")
                 clean = re.sub(r"<[^>]+>", "", chunk)
-                requests.post(
-                    tg_url,
-                    json={"chat_id": TELEGRAM_CHAT_ID, "text": clean},
-                    timeout=CONFIG["REQUEST_TIMEOUT"],
-                )
+                requests.post(tg_url, json={"chat_id": TELEGRAM_CHAT_ID, "text": clean}, timeout=CONFIG["REQUEST_TIMEOUT"])
         except Exception as e:
             print(f"Fehler beim Telegram-Versand: {e}")
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main():
     missing = [k for k, v in REQUIRED_SECRETS.items() if not v]
@@ -446,11 +380,7 @@ def main():
         sys.exit(1)
 
     payload = {"em": KB_EMAIL, "pass": KB_PASSWORD, "loy": False, "rep": {}}
-    login_res_raw = session.post(
-        "https://api.kickbase.com/v4/user/login",
-        json=payload,
-        timeout=CONFIG["REQUEST_TIMEOUT"],
-    )
+    login_res_raw = session.post("https://api.kickbase.com/v4/user/login", json=payload, timeout=CONFIG["REQUEST_TIMEOUT"])
     login_res_raw.raise_for_status()
     login_res = login_res_raw.json()
 
@@ -473,15 +403,8 @@ def main():
 
     news_headlines = get_news()
 
-    ranking_res = session.get(
-        f"https://api.kickbase.com/v4/leagues/{liga_id}/ranking",
-        timeout=CONFIG["REQUEST_TIMEOUT"],
-    ).json()
-
-    market_res = session.get(
-        f"https://api.kickbase.com/v4/leagues/{liga_id}/market",
-        timeout=CONFIG["REQUEST_TIMEOUT"],
-    ).json()
+    ranking_res = session.get(f"https://api.kickbase.com/v4/leagues/{liga_id}/ranking", timeout=CONFIG["REQUEST_TIMEOUT"]).json()
+    market_res = session.get(f"https://api.kickbase.com/v4/leagues/{liga_id}/market", timeout=CONFIG["REQUEST_TIMEOUT"]).json()
 
     players = sorted(market_res.get("it", []), key=lambda x: x.get("exs", 999999))
 
@@ -504,24 +427,17 @@ def main():
         p_detail = {}
         if player_id:
             try:
-                res = session.get(
-                    f"https://api.kickbase.com/v4/leagues/{liga_id}/players/{player_id}",
-                    timeout=CONFIG["REQUEST_TIMEOUT"],
-                )
+                res = session.get(f"https://api.kickbase.com/v4/leagues/{liga_id}/players/{player_id}", timeout=CONFIG["REQUEST_TIMEOUT"])
                 res.raise_for_status()
                 p_detail = res.json()
-
                 if CONFIG["DEBUG_PLAYER_DETAIL"] and not debug_done:
-                    print("DEBUG P_DETAIL (erster Spieler):",
-                          json.dumps(p_detail, indent=2, ensure_ascii=False))
+                    print("DEBUG P (Marktdaten):", json.dumps(p, indent=2, ensure_ascii=False))
+                    print("DEBUG P_DETAIL (erster Spieler):", json.dumps(p_detail, indent=2, ensure_ascii=False))
                     debug_done = True
-
             except Exception as e:
                 print(f"Warnung: Detaildaten fuer {nachname} nicht geladen: {e}")
 
-        eval_result = evaluate_player(
-            p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles
-        )
+        eval_result = evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles)
         max_bid_str = f"{eval_result['max_bid']:,}".replace(",", ".")
 
         msg += f"• <b>{esc(nachname)}</b> {trend} | 💰 {mw_str} € | ⏳ {time_str}\n"
@@ -530,13 +446,10 @@ def main():
 
         if eval_result["reason"]:
             msg += f"  ℹ️ <b>Begründung:</b> {esc(eval_result['reason'])}\n"
-
         if eval_result["is_injured"]:
             msg += "  🩹 <b>Status: Verletzt / Reha / Gesperrt</b>\n"
-
         if p.get("tid") in blocked_teams:
             msg += f"  🚫 <b>Sperre (Gegner):</b> {esc(', '.join(blocked_teams[p.get('tid')]))}\n"
-
         for h in eval_result["matched_news"]:
             msg += f"  📰 <b>News:</b> {esc(h)}\n"
         msg += "\n"
