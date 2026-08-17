@@ -4,7 +4,7 @@ import xml.etree.ElementTree as ET
 import re
 import json
 from datetime import datetime, date
-import google.generativeai as genai  # <-- Der neue VIP-Eingang zur KI!
+from google import genai  # Neuer offizieller Google SDK Client
 
 KB_EMAIL = os.environ.get("KB_EMAIL")
 KB_PASSWORD = os.environ.get("KB_PASSWORD")
@@ -80,7 +80,6 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     trend_flag = p.get("mvt")
     tid = p.get("tid")
 
-    # Überprüfung auf beiden Kickbase-Ebenen (Markt-Übersicht UND Detail-Ebene)
     is_injured = False
     st_market = str(p.get("st", "0"))
     st_detail = str(p_detail.get("status", p_detail.get("st", "0")) if p_detail else "0")
@@ -155,11 +154,12 @@ Hier sind die aktuellen Marktspieler mit Analyse-Daten:
 
 Gib für die 3-5 spannendsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko). Antworte im Telegram-Markdown mit Bulletpoints. Keine Einleitung, direkt zur Sache."""
 
-    # Nutzung der offiziellen Google-Bibliothek
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+        )
         return response.text
     except Exception as e:
         return f"❌ KI-Fehler: {e}"
@@ -209,7 +209,6 @@ def main():
             if eval_result["reason"]:
                 msg += f"  ℹ️ *Begründung:* {eval_result['reason']}\n"
 
-            # Check, ob er verletzt/gesperrt ist (wird jetzt absolut narrensicher abgegriffen)
             st_market = str(p.get("st", "0"))
             st_detail = str(p_detail.get("status", p_detail.get("st", "0")) if p_detail else "0")
             if st_market in ["1", "2", "4", "8"] or st_detail in ["1", "2", "4", "8"]:
