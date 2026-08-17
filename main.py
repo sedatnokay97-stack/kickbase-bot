@@ -518,7 +518,7 @@ def get_overpay_pct(avg_points):
     return CONFIG["OVERPAY_TIERS"][-1][1]
 
 
-def evaluate_player(player, detail, headlines, blocked_teams, my_team_counts, cycles, budget, lineup_names, fixture, gemini_map, known_headlines, acceleration, form_points):
+def evaluate_player(player, detail, headlines, blocked_teams, my_team_counts, cycles, budget, lineup_names, fixture, gemini_map, known_headlines, mv_acceleration, form_points):
     lastname = player.get("n", "Unbekannt")
     market_value = player.get("mv", 0)
     tid = player.get("tid")
