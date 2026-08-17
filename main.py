@@ -588,10 +588,8 @@ def get_llm_analysis(scored_players, cycles):
 
 
 def send_telegram_messages(message):
-    if CONFIG["DRY_RUN"]:
-        print("DRY_RUN aktiv – Telegram-Nachricht wird nicht gesendet.")
-        print(message)
-        return
+       if CONFIG["DRY_RUN"]:
+        message += "🧪 <b>DRY_RUN aktiv</b> – Versand und History-Speicherung sind deaktiviert.\n\n"
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     chunks, current = [], ""
     for line in message.split("\n"):
