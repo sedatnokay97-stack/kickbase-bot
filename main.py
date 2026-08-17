@@ -3,10 +3,10 @@ import sys
 import re
 import json
 import time
+import requests
 from bs4 import BeautifulSoup
 from google import genai
 from google.genai import types
-from curl_cffi import requests
 
 # ==========================================
 # CONFIG & ENVIRONMENT SECRETS
@@ -27,41 +27,27 @@ CONFIG = {
 }
 
 # ==========================================
-# KNOTEN 1: KICKBASE LIVE API (v4 mit TLS-Bypass)
+# KNOTEN 1: KICKBASE LIVE API
 # ==========================================
 def kickbase_login():
-    import os
-    import requests
-
-    email = os.environ.get("KB_EMAIL")
-    password = os.environ.get("KB_PASSWORD")
-
     print("🚀 Starte Kickbase Login mit Android-Header...")
-
-    # Der zwingend erforderliche Android-Header
     headers = {
         "User-Agent": "Kickbase/8.10.0 (Android)",
         "Content-Type": "application/json"
     }
-
-    # Die neue Kickbase API-Struktur (em und pass)
     body = {
-        "em": email,
-        "pass": password,
+        "em": KB_EMAIL,
+        "pass": KB_PASSWORD,
         "loy": False,
         "rep": {}
     }
-
-    # API-Anfrage senden
     resp = requests.post("https://api.kickbase.com/v4/user/login", json=body, headers=headers)
-
     if resp.status_code != 200:
         raise ValueError(f"❌ Kickbase API Login-Fehler (HTTP {resp.status_code}): {resp.text}")
 
     data = resp.json()
     token = data.get("tkn")
-
-    # Liga-ID automatisch aus der neuen 'lins' Liste auslesen
+    
     league_id = None
     if "lins" in data and len(data["lins"]) > 0:
         league_id = data["lins"][0]["i"]
@@ -76,16 +62,11 @@ def get_market_players(token, league_id):
     url = f"https://api.kickbase.com/v4/leagues/{league_id}/market"
     headers = {
         "Authorization": f"Bearer {token}",
-        "Origin": "https://play.kickbase.com",
-        "Referer": "https://play.kickbase.com/"
+        "User-Agent": "Kickbase/8.10.0 (Android)",
+        "Accept": "application/json"
     }
     
-    resp = requests.get(
-        url,
-        headers=headers,
-        impersonate="chrome",
-        timeout=CONFIG["REQUEST_TIMEOUT"]
-    )
+    resp = requests.get(url, headers=headers, timeout=CONFIG["REQUEST_TIMEOUT"])
     resp.raise_for_status()
     data = resp.json()
     return data.get("players", [])
@@ -94,11 +75,11 @@ def get_market_players(token, league_id):
 # KNOTEN 2: LIGAINSIDER SCRAPING
 # ==========================================
 def get_ligainsider_lineups():
-    """ Scrapt voraussichtliche Startelf-Spieler von LigaInsider. """
     url = "https://www.ligainsider.de/bundesliga/aufstellung/"
     starters = set()
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
-        resp = requests.get(url, impersonate="chrome", timeout=CONFIG["REQUEST_TIMEOUT"])
+        resp = requests.get(url, headers=headers, timeout=CONFIG["REQUEST_TIMEOUT"])
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, "html.parser")
             for link in soup.find_all("a", href=True):
@@ -111,11 +92,11 @@ def get_ligainsider_lineups():
     return starters
 
 def get_ligainsider_injuries():
-    """ Scrapt die Verletztenliste von LigaInsider. """
     url = "https://www.ligainsider.de/verletzungen-sperren/"
     injured = set()
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
-        resp = requests.get(url, impersonate="chrome", timeout=CONFIG["REQUEST_TIMEOUT"])
+        resp = requests.get(url, headers=headers, timeout=CONFIG["REQUEST_TIMEOUT"])
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, "html.parser")
             for tag in soup.find_all(["span", "td", "a"]):
@@ -146,7 +127,6 @@ def save_history(history):
         print(f"⚠️ History Speicherung fehlgeschlagen: {e}")
 
 def calculate_real_daily_trend(player_id, current_mv, history):
-    """ Berechnet den echten Euro-Trend anhand des Vortags-MW. """
     player_id_str = str(player_id)
     player_hist = history.get(player_id_str, {})
     previous_mv = player_hist.get("mv")
@@ -160,7 +140,6 @@ def calculate_real_daily_trend(player_id, current_mv, history):
     return daily_trend
 
 def predict_mv_and_overpay(current_mv, daily_trend):
-    """ S-Kurven-Dämpfung für den Marktwertgewinn bis Spieltag 1. """
     if daily_trend <= 0:
         return current_mv, int(current_mv * 1.02), 0
 
@@ -217,7 +196,7 @@ def call_gemini(prompt):
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-1.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.3,
@@ -227,7 +206,7 @@ def call_gemini(prompt):
         return response.text.strip() if response.text else "Keine KI-Antwort erhalten."
     except Exception as exc:
         print(f"⚠️ Gemini API-Hinweis: {exc}")
-        return "KI-Analyse derzeit nicht verfügbar."
+        return f"KI-Analyse derzeit nicht verfügbar. Fehler: {exc}"
 
 # ==========================================
 # KNOTEN 5: TELEGRAM DISPATCHER & SPLITTER
@@ -258,11 +237,6 @@ def split_telegram_message(message, max_len):
     return [chunk for chunk in chunks if chunk.strip()]
 
 def send_telegram_messages(message):
-    if CONFIG["DRY_RUN"]:
-        print("DRY_RUN aktiv – Telegram-Versand übersprungen.")
-        print(message)
-        return
-
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         raise ValueError("❌ TELEGRAM_TOKEN oder TELEGRAM_CHAT_ID fehlt in den Secrets!")
 
@@ -279,7 +253,6 @@ def send_telegram_messages(message):
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True,
             },
-            impersonate="chrome",
             timeout=CONFIG["REQUEST_TIMEOUT"],
         )
         print(f"DEBUG Telegram HTML {index}/{len(chunks)} ({len(chunk)} Zeichen): HTTP {response.status_code}")
@@ -296,7 +269,6 @@ def send_telegram_messages(message):
                 "text": plain,
                 "disable_web_page_preview": True,
             },
-            impersonate="chrome",
             timeout=CONFIG["REQUEST_TIMEOUT"],
         )
         print(f"DEBUG Telegram Plaintext Fallback {index}/{len(chunks)}: HTTP {fallback.status_code}")
@@ -343,11 +315,14 @@ def main():
     save_history(history)
     
     top_targets = [p for p in evaluated_list if p["exp_profit"] > 0][:5]
-    prompt = (
-        f"Du bist ein Kickbase-Experte. Gib ein knallhartes Fazit (max 3 deutsche Sätze) "
-        f"zu diesen Markt-Chancen:\n{json.dumps(top_targets)}"
-    )
-    llm_summary = call_gemini(prompt)
+    if not top_targets:
+        llm_summary = "Aktuell keine profitablen Spieler auf dem Markt."
+    else:
+        prompt = (
+            f"Du bist ein Kickbase-Experte. Gib ein knallhartes Fazit (max 3 deutsche Sätze) "
+            f"zu diesen Markt-Chancen:\n{json.dumps(top_targets)}"
+        )
+        llm_summary = call_gemini(prompt)
     
     report_lines.append(f"\n🤖 <b>KI-Manager Fazit:</b>\n{llm_summary}")
     full_report = "\n".join(report_lines)
