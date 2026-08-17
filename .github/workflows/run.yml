@@ -3,7 +3,7 @@ name: Kickbase 8h Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */8 * * *'
+    - cron: "0 */8 * * *"
 
 permissions:
   contents: write
@@ -19,12 +19,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run script
+      - name: Run Kickbase bot
         env:
           KB_EMAIL: ${{ secrets.KB_EMAIL }}
           KB_PASSWORD: ${{ secrets.KB_PASSWORD }}
@@ -33,4 +33,5 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          DRY_RUN: "false"
         run: python main.py
