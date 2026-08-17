@@ -84,6 +84,29 @@ TEAM_LINEUP_SLUGS = {
 
 BUNDESLIGA_TEAM_KEYS = list(TEAM_LINEUP_SLUGS.keys())
 
+# Lesbare Anzeigenamen fuer die Team-Keys (fuer Restprogramm-Gegner-Anzeige)
+TEAM_DISPLAY_NAMES = {
+    "bayern": "Bayern",
+    "werder": "Werder Bremen",
+    "frankfurt": "Frankfurt",
+    "leverkusen": "Leverkusen",
+    "gladbach": "Gladbach",
+    "hamburg": "Hamburger SV",
+    "hoffenheim": "Hoffenheim",
+    "stuttgart": "Stuttgart",
+    "schalke": "Schalke 04",
+    "dortmund": "Dortmund",
+    "k\u00f6ln": "K\u00f6ln",
+    "koeln": "K\u00f6ln",
+    "mainz": "Mainz 05",
+    "freiburg": "Freiburg",
+    "augsburg": "Augsburg",
+    "union berlin": "Union Berlin",
+    "paderborn": "Paderborn",
+    "leipzig": "Leipzig",
+    "elversberg": "Elversberg",
+}
+
 # Manuell verifizierte Zuordnung Kickbase-interne tid -> Team-Key.
 # WICHTIG: tid kommt als STRING aus der Kickbase-API (z.B. "7"), daher hier
 # ebenfalls als String-Keys hinterlegt - sonst schlaegt der dict-Lookup fehl!
@@ -381,6 +404,7 @@ def get_team_strength(team_key):
 
 
 def get_upcoming_opponents(fixtures, team_key, count):
+    """Gibt eine sortierte Liste von (datum, gegner_team_key) fuer die naechsten Spiele zurueck."""
     upcoming = []
     for m in fixtures:
         if m.get("matchIsFinished"):
@@ -390,9 +414,9 @@ def get_upcoming_opponents(fixtures, team_key, count):
         k1 = get_team_key(t1)
         k2 = get_team_key(t2)
         if k1 == team_key and k2:
-            upcoming.append((m.get("matchDateTimeUTC", ""), k2, t2))
+            upcoming.append((m.get("matchDateTimeUTC", ""), k2))
         elif k2 == team_key and k1:
-            upcoming.append((m.get("matchDateTimeUTC", ""), k1, t1))
+            upcoming.append((m.get("matchDateTimeUTC", ""), k1))
     upcoming.sort(key=lambda x: x[0])
     return upcoming[:count]
 
@@ -404,9 +428,9 @@ def fixture_difficulty(fixtures, team_key):
     opponents = get_upcoming_opponents(fixtures, team_key, CONFIG["FIXTURE_LOOKAHEAD"])
     if not opponents:
         return None
-    strengths = [get_team_strength(k) for _, k, _ in opponents]
+    strengths = [get_team_strength(k) for _, k in opponents]
     avg_strength = sum(strengths) / len(strengths)
-    opponent_names = [name.split()[-1] for _, _, name in opponents if name]
+    opponent_names = [TEAM_DISPLAY_NAMES.get(k, k.title()) for _, k in opponents]
     if avg_strength <= 35:
         label = "leicht"
     elif avg_strength <= 55:
