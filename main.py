@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 import requests
 from google import genai
 from google.genai import types
+from bs4 import BeautifulSoup
 
 # ---------------------------------------------------------------------------
 # Konfiguration
@@ -31,7 +32,7 @@ REQUIRED_SECRETS = {
 CONFIG = {
     # Liga-Regeln / Zeitlogik
     "MAX_PER_TEAM": 2,
-    "FIRST_MATCHDAY": date(2026, 8, 28),   # Datum 1. Spieltag
+    "FIRST_MATCHDAY": date(2026, 8, 28),   # Datum 1. Spieltag anpassen
     "MW_UPDATE_HOUR_UTC": 20,              # Marktwert-Update (UTC)
     "PLAYERS_TO_SHOW": 15,
 
@@ -39,11 +40,22 @@ CONFIG = {
     "REQUEST_TIMEOUT": 10,
     "TELEGRAM_MAX_LEN": 3900,
 
-    # KI-Modell aus deiner Liste
+    # KI-Modell (funktioniert mit generateContent; ggf. auf ein Modell aus deiner ListModels-Ausgabe ändern)
     "GEMINI_MODEL": "gemini-3.7-flash",
 }
 
-# Session für alle HTTP-Requests
+# News-Quellen
+NEWS_FEEDS = [
+    # Kicker Bundesliga-News (offizieller RSS-Feed)
+    "https://newsfeed.kicker.de/news/bundesliga",
+    # Transfermarkt allgemeine News (RSS-Feed)
+    "https://www.transfermarkt.de/rss/news",
+]
+
+# LigaInsider Verletzten-/Sperren-Liste (HTML)
+LIGAINSIDER_INJURY_URL = "https://www.ligainsider.de/bundesliga/verletzte-und-gesperrte-spieler/"
+
+# HTTP-Session
 session = requests.Session()
 session.headers.update({
     "User-Agent": "Kickbase/6.8.0 (iPhone; iOS 16.5; Scale/3.00)",
@@ -57,27 +69,87 @@ def esc(value) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Datenquellen
+# News-Datenquellen
 # ---------------------------------------------------------------------------
 
-def get_news():
-    """LigaInsider-News via RSS. Bei 404 nur Warnung, kein Abbruch."""
-    news = []
+def get_ligainsider_injury_news():
+    """
+    Scraped die LigaInsider-Seite 'Verletzte und gesperrte Spieler' und baut Headlines
+    im Format 'Spieler: letzte News zu diesem Status'.
+    """
+    headlines = []
     try:
-        res = requests.get(
-            "https://www.ligainsider.de/rss/news.xml",
-            timeout=CONFIG["REQUEST_TIMEOUT"],
-        )
+        res = session.get(LIGAINSIDER_INJURY_URL, timeout=CONFIG["REQUEST_TIMEOUT"])
         res.raise_for_status()
-        root = ET.fromstring(res.text)
-        for item in root.findall(".//item"):
-            title = item.find("title")
-            if title is not None and title.text:
-                news.append(title.text)
-    except Exception as e:
-        print(f"Warnung: LigaInsider-News konnten nicht geladen werden: {e}")
-    return news
+        soup = BeautifulSoup(res.text, "html.parser")
 
+        # Erste Tabelle auf der Seite suchen (Spieler / Grund / Letzte News / Fehlt seit)
+        table = soup.find("table")
+        if table:
+            for row in table.find_all("tr"):
+                cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
+                # Erwartet: z.B. [Spieler, Grund, Letzte News, Fehlt seit]
+                if len(cells) >= 3:
+                    player = cells[0]
+                    last_news = cells[2]
+                    if player and last_news and player.lower() != "spieler":
+                        headlines.append(f"{player}: {last_news}")
+        else:
+            print("Warnung: Keine Tabelle auf LigaInsider-Verletztenseite gefunden.")
+    except Exception as e:
+        print(f"Warnung: LigaInsider-Verletztenseite konnte nicht geladen werden: {e}")
+
+    return headlines
+
+
+def get_news():
+    """
+    Sammelt News-Headlines aus mehreren Quellen:
+    - Kicker Bundesliga RSS
+    - Transfermarkt RSS
+    - LigaInsider HTML-Verletztenseite
+    """
+    headlines = []
+
+    # 1) RSS-Feeds (Kicker + Transfermarkt)
+    for url in NEWS_FEEDS:
+        try:
+            res = requests.get(url, timeout=CONFIG["REQUEST_TIMEOUT"])
+            res.raise_for_status()
+            try:
+                root = ET.fromstring(res.text)
+            except ET.ParseError:
+                print(f"Warnung: RSS-Feed konnte nicht geparst werden: {url}")
+                continue
+
+            for item in root.findall(".//item"):
+                title_el = item.find("title")
+                if title_el is not None and title_el.text:
+                    headlines.append(title_el.text)
+        except Exception as e:
+            print(f"Warnung: News-Feed konnte nicht geladen werden: {url} -> {e}")
+
+    # 2) LigaInsider HTML-Scraping für Verletzungen/Sperren
+    try:
+        li_headlines = get_ligainsider_injury_news()
+        headlines.extend(li_headlines)
+    except Exception as e:
+        print(f"Warnung: LigaInsider-News konnten nicht per HTML-Scraping geladen werden: {e}")
+
+    # 3) Duplikate entfernen
+    unique = []
+    seen = set()
+    for h in headlines:
+        if h not in seen:
+            seen.add(h)
+            unique.append(h)
+
+    return unique
+
+
+# ---------------------------------------------------------------------------
+# Kickbase-Kader / Liga
+# ---------------------------------------------------------------------------
 
 def count_by_team(squad_items):
     """Zählt Spieler pro Team-ID im Kader."""
@@ -94,17 +166,14 @@ def build_blocked_teams(liga_id, ranking_res, my_manager_id):
     """
     Gegner-Radar: Für jeden Manager prüfen, welche Vereine bereits
     mit >= MAX_PER_TEAM Spielern besetzt sind.
-    Nutzt den offiziellen Managers-Endpoint /managers/{managerId}/squad.[web:40]
+    Nutzt den offiziellen Managers-Endpoint /managers/{managerId}/squad.
     """
     blocked_teams = {}
     for user in ranking_res.get("users", []):
-        # Manager-ID des Gegners aus dem Ranking-Objekt holen
         opponent_manager_id = user.get("mid") or user.get("id")
 
-        # eigenen Manager überspringen
         if opponent_manager_id == my_manager_id:
             continue
-
         if not opponent_manager_id:
             continue
 
@@ -127,7 +196,7 @@ def build_blocked_teams(liga_id, ranking_res, my_manager_id):
 
 
 def get_my_team_counts(liga_id, my_manager_id):
-    """Eigenen Kader über Managers-Endpoint laden und Spieleranzahl pro Verein zählen.[web:40]"""
+    """Eigenen Kader über Managers-Endpoint laden und Spieleranzahl pro Verein zählen."""
     if not my_manager_id:
         print("Warnung: my_manager_id ist None – eigener Kader kann nicht geladen werden.")
         return {}
@@ -144,6 +213,10 @@ def get_my_team_counts(liga_id, my_manager_id):
         my_squad = []
     return count_by_team(my_squad)
 
+
+# ---------------------------------------------------------------------------
+# Zeitlogik & News-Matching
+# ---------------------------------------------------------------------------
 
 def market_updates_until_first_matchday():
     """
@@ -264,7 +337,7 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     if is_injured:
         reasons.append("Verletzungs-/Sperrrisiko (Kickbase)")
     if has_negative_news:
-        reasons.append("kritische News bei LigaInsider")
+        reasons.append("kritische News aus mehreren Quellen")
     if mw_cycles > 0:
         reasons.append(f"{mw_cycles} Marktwert-Updates bis 1. Spieltag")
     if violates_my_limit:
@@ -288,7 +361,8 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
 def get_llm_analysis(scored_players, cycles_info):
     """
     Ruft Gemini über das google-genai SDK auf und gibt einen Text zurück.
-    Bei Fehlern kommt ein klarer Hinweis statt eines Absturzes.[web:88]
+    Bei Fehlern kommt ein klarer Hinweis statt eines Absturzes.
+    AFC wird explizit deaktiviert, damit die SDK-Warnung nicht erscheint.
     """
     if not GEMINI_API_KEY:
         return "FEHLER: Kein GEMINI_API_KEY gefunden!"
@@ -312,13 +386,15 @@ Antworte in klarem Fliesstext ohne Markdown-Formatierung (keine Sternchen, keine
             config=types.GenerateContentConfig(
                 temperature=0.4,
                 max_output_tokens=700,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    disable=True  # AFC aus, damit keine Warnung und kein automatisches Tool-Calling.[web:122][web:159]
+                ),
             ),
         )
 
         text = (response.text or "").strip()
         return text if text else "KI hat keine Analyse geliefert."
     except Exception as e:
-        # Hier landen auch 503-Fehler bei hoher Auslastung; Script bleibt stabil.[file:69][web:88]
         print(f"Warnung: Gemini-Aufruf fehlgeschlagen: {e}")
         return f"KI-Analyse aktuell nicht verfuegbar ({type(e).__name__})."
 
@@ -354,7 +430,6 @@ def send_telegram_messages(full_text):
             )
             if resp.status_code != 200:
                 print(f"Warnung: Telegram HTML-Versand fehlgeschlagen ({resp.status_code}): {resp.text}")
-                # Fallback: HTML-Tags entfernen
                 clean = re.sub(r"<[^>]+>", "", chunk)
                 requests.post(
                     tg_url,
@@ -390,7 +465,6 @@ def main():
     if not token:
         raise ValueError("Login fehlgeschlagen! Kein Token erhalten.")
 
-    # League-ID und eigene User/Manager-ID robust auslesen.[web:40][web:42]
     liga_id = login_res.get("srvl", [])[0].get("id")
 
     user_obj = login_res.get("u", {}) or {}
@@ -434,7 +508,6 @@ def main():
         exs = p.get("exs", 0)
         time_str = f"{exs//3600}h {(exs%3600)//60}m" if exs > 0 else "Abgelaufen"
 
-        # Detaildaten / Status
         player_id = p.get("id")
         p_detail = {}
         if player_id:
@@ -477,7 +550,6 @@ def main():
             "risiken": eval_result["reason"],
         })
 
-    # KI-Analyse anhängen (oder Fehlertext)
     llm_text = get_llm_analysis(scored_players, mw_cycles)
     msg += "🤖 <b>KI-Manager-Einschätzung:</b>\n" + esc(llm_text)
 
