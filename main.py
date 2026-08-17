@@ -3,10 +3,10 @@ import sys
 import re
 import json
 import time
-import requests
 from bs4 import BeautifulSoup
 from google import genai
 from google.genai import types
+from curl_cffi import requests
 
 # ==========================================
 # CONFIG & ENVIRONMENT SECRETS
@@ -27,7 +27,7 @@ CONFIG = {
 }
 
 # ==========================================
-# KNOTEN 1: KICKBASE LIVE API (v4)
+# KNOTEN 1: KICKBASE LIVE API (v4 mit TLS-Bypass)
 # ==========================================
 def kickbase_login():
     """ Loggt den Bot bei Kickbase v4 ein und liefert Token + Liga-ID. """
@@ -42,13 +42,18 @@ def kickbase_login():
     }
     headers = {
         "Content-Type": "application/json; charset=utf-8",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
         "Origin": "https://play.kickbase.com",
         "Referer": "https://play.kickbase.com/"
     }
     
-    resp = requests.post(url, json=payload, headers=headers, timeout=CONFIG["REQUEST_TIMEOUT"])
+    resp = requests.post(
+        url,
+        json=payload,
+        headers=headers,
+        impersonate="chrome",
+        timeout=CONFIG["REQUEST_TIMEOUT"]
+    )
     
     print(f"DEBUG API HTTP Status: {resp.status_code}")
     print(f"DEBUG API Response Body: {resp.text}")
@@ -72,12 +77,16 @@ def get_market_players(token, league_id):
     url = f"https://api.kickbase.com/v4/leagues/{league_id}/market"
     headers = {
         "Authorization": f"Bearer {token}",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Origin": "https://play.kickbase.com",
         "Referer": "https://play.kickbase.com/"
     }
     
-    resp = requests.get(url, headers=headers, timeout=CONFIG["REQUEST_TIMEOUT"])
+    resp = requests.get(
+        url,
+        headers=headers,
+        impersonate="chrome",
+        timeout=CONFIG["REQUEST_TIMEOUT"]
+    )
     resp.raise_for_status()
     data = resp.json()
     return data.get("players", [])
@@ -90,7 +99,7 @@ def get_ligainsider_lineups():
     url = "https://www.ligainsider.de/bundesliga/aufstellung/"
     starters = set()
     try:
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=CONFIG["REQUEST_TIMEOUT"])
+        resp = requests.get(url, impersonate="chrome", timeout=CONFIG["REQUEST_TIMEOUT"])
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, "html.parser")
             for link in soup.find_all("a", href=True):
@@ -107,7 +116,7 @@ def get_ligainsider_injuries():
     url = "https://www.ligainsider.de/verletzungen-sperren/"
     injured = set()
     try:
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=CONFIG["REQUEST_TIMEOUT"])
+        resp = requests.get(url, impersonate="chrome", timeout=CONFIG["REQUEST_TIMEOUT"])
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, "html.parser")
             for tag in soup.find_all(["span", "td", "a"]):
@@ -271,6 +280,7 @@ def send_telegram_messages(message):
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True,
             },
+            impersonate="chrome",
             timeout=CONFIG["REQUEST_TIMEOUT"],
         )
         print(f"DEBUG Telegram HTML {index}/{len(chunks)} ({len(chunk)} Zeichen): HTTP {response.status_code}")
@@ -287,6 +297,7 @@ def send_telegram_messages(message):
                 "text": plain,
                 "disable_web_page_preview": True,
             },
+            impersonate="chrome",
             timeout=CONFIG["REQUEST_TIMEOUT"],
         )
         print(f"DEBUG Telegram Plaintext Fallback {index}/{len(chunks)}: HTTP {fallback.status_code}")
