@@ -1,28 +1,25 @@
-name: Kickbase 8h Bot
+name: Kickbase Bot Execution
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */8 * * *"
-
-permissions:
-  contents: write
+    - cron: '0 */8 * * *'  # Laufen alle 8 Stunden
 
 jobs:
   run-bot:
-    runs-on: ubuntu-latest
-
+    runs-runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install requests beautifulsoup4 google-genai
 
       - name: Run Kickbase bot
         env:
@@ -31,7 +28,4 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          DRY_RUN: "false"
         run: python main.py
