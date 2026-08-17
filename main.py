@@ -85,21 +85,23 @@ TEAM_LINEUP_SLUGS = {
 BUNDESLIGA_TEAM_KEYS = list(TEAM_LINEUP_SLUGS.keys())
 
 # Manuell verifizierte Zuordnung Kickbase-interne tid -> Team-Key.
+# WICHTIG: tid kommt als STRING aus der Kickbase-API (z.B. "7"), daher hier
+# ebenfalls als String-Keys hinterlegt - sonst schlaegt der dict-Lookup fehl!
 # 12 von 18 Vereinen bestaetigt. Offen: dortmund, schalke, hamburg,
 # augsburg, paderborn, elversberg.
 KICKBASE_TID_TO_TEAM = {
-    2: "bayern",
-    4: "frankfurt",
-    5: "freiburg",
-    7: "leverkusen",
-    9: "stuttgart",
-    10: "werder",
-    14: "hoffenheim",
-    15: "gladbach",
-    18: "mainz",
-    28: "koeln",
-    40: "union berlin",
-    43: "leipzig",
+    "2": "bayern",
+    "4": "frankfurt",
+    "5": "freiburg",
+    "7": "leverkusen",
+    "9": "stuttgart",
+    "10": "werder",
+    "14": "hoffenheim",
+    "15": "gladbach",
+    "18": "mainz",
+    "28": "koeln",
+    "40": "union berlin",
+    "43": "leipzig",
 }
 
 TEAM_STRENGTH_LAST_SEASON = {
@@ -284,10 +286,10 @@ def get_my_budget(liga_id):
 
 def get_team_names():
     """
-    Liefert tid -> Team-Key. Da Kickbase v4 keinen dokumentierten Team-Namen-Endpoint
-    hat, nutzen wir primaer eine manuell verifizierte statische Zuordnung
-    (KICKBASE_TID_TO_TEAM) und versuchen zusaetzlich einen (evtl. nicht funktionierenden)
-    API-Call als Fallback/Erweiterung.
+    Liefert tid (als String) -> Team-Key. Da Kickbase v4 keinen dokumentierten
+    Team-Namen-Endpoint hat, nutzen wir primaer eine manuell verifizierte statische
+    Zuordnung (KICKBASE_TID_TO_TEAM) und versuchen zusaetzlich einen (evtl. nicht
+    funktionierenden) API-Call als Fallback/Erweiterung.
     """
     names = {}
     try:
@@ -303,13 +305,13 @@ def get_team_names():
                 tid = item.get("id") or item.get("tid")
                 name = item.get("name") or item.get("nm") or item.get("n")
                 if tid and name:
-                    names[tid] = name
+                    names[str(tid)] = name
     except Exception as e:
         print(f"Warnung: Team-Namen ueber API nicht ladbar (nutze statische Zuordnung): {e}")
 
     # Statische, manuell verifizierte Zuordnung ueberschreibt/ergaenzt die API-Antwort
     for tid, team_key in KICKBASE_TID_TO_TEAM.items():
-        names[tid] = team_key
+        names[str(tid)] = team_key
 
     return names
 
