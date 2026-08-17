@@ -152,6 +152,7 @@ def kb_get(url, **kwargs):
 
     return None
 
+
 def load_history():
     if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
         return {}, None
@@ -408,7 +409,7 @@ def call_gemini(prompt, max_tokens, temperature):
 def filter_news_with_gemini(headlines, names):
     """
     Best-effort-News-Zuordnung via Gemini.
-    Bei ungültigem Modell-JSON wird automatisch der Regex-Fallback verwendet.
+    Bei ungultigem Modell-JSON wird automatisch der Regex-Fallback verwendet.
     """
     if not GEMINI_API_KEY or not headlines or not names:
         return {}
@@ -422,7 +423,7 @@ Antworte ausschließlich mit valide parsebarem JSON:
 Wichtig:
 - Kein Markdown.
 - Kein erklärender Text vor oder nach dem JSON.
-- Keine Zeilenumbrüche innerhalb eines JSON-Strings.
+- Keine Zeilenumbruche innerhalb eines JSON-Strings.
 - Spieler ohne Treffer weglassen.
 
 Spieler: {", ".join(names)}
@@ -488,7 +489,7 @@ def extract_form_points(detail):
     for key in ("lastMatchdaysPoints", "recentPoints", "form", "last5", "matchdaysPoints"):
         value = (detail or {}).get(key)
         if isinstance(value, list):
-            values = [value for value in value if isinstance(value, (int, float))]
+            values = [v for v in value if isinstance(v, (int, float))]
             if values:
                 return sum(values) / len(values)
         if isinstance(value, (int, float)):
@@ -701,4 +702,3 @@ if __name__ == "__main__":
         print(f"Fehler: {exc}")
         traceback.print_exc()
         sys.exit(1)
-Hotfix: kb_get kein Retry bei 404, get_team_names robust, filter_news_with_gemini JSON-Recovery
