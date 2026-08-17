@@ -48,12 +48,11 @@ CONFIG = {
 NEWS_FEEDS = [
     # Kicker Bundesliga-News
     "https://newsfeed.kicker.de/news/bundesliga",
-    # Transfermarkt allgemeine News
-    "https://www.transfermarkt.de/rss/news",
+    # Transfermarkt-News via t-online-Spiegel (Transfermarkt selbst blockt Bots aktiv)
+    "https://feeds.t-online.de/rss/transfermarkt",
     # Sportschau (ARD) Bundesliga-News
     "https://www.sportschau.de/fussball/bundesliga/index~rss2.xml",
 ]
-
 # LigaInsider Verletzten-/Sperren-Liste (HTML-Scraping)
 LIGAINSIDER_INJURY_URL = "https://www.ligainsider.de/bundesliga/verletzte-und-gesperrte-spieler/"
 
