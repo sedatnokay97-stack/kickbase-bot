@@ -58,12 +58,14 @@ def kickbase_login():
     return token, str(league_id)
 
 def get_market_players(token, league_id):
-    """ Holt alle aktuellen Transfermarkt-Spieler der Liga. """
+    """ Holt alle aktuellen Transfermarkt-Spieler im alten Web-Format. """
     url = f"https://api.kickbase.com/v4/leagues/{league_id}/market"
     headers = {
         "Authorization": f"Bearer {token}",
-        "User-Agent": "Kickbase/8.10.0 (Android)",
-        "Accept": "application/json"
+        "Accept": "application/json",
+        "Origin": "https://play.kickbase.com",
+        "Referer": "https://play.kickbase.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
     resp = requests.get(url, headers=headers, timeout=CONFIG["REQUEST_TIMEOUT"])
