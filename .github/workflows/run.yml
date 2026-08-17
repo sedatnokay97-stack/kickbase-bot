@@ -1,13 +1,14 @@
-name: Kickbase 12h Bot
+name: Kickbase 8h Bot
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */4 * * *'
+    - cron: '0 */8 * * *'   # alle 8 Stunden
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -18,7 +19,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests google-genai
+        run: pip install -r requirements.txt
 
       - name: Run script
         env:
