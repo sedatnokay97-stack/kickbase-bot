@@ -30,47 +30,46 @@ CONFIG = {
 # KNOTEN 1: KICKBASE LIVE API (v4 mit TLS-Bypass)
 # ==========================================
 def kickbase_login():
-    """ Loggt den Bot bei Kickbase v4 ein und liefert Token + Liga-ID. """
-    if not KB_EMAIL or not KB_PASSWORD:
-        raise ValueError("❌ KB_EMAIL oder KB_PASSWORD fehlt in den Environment Variables.")
-    
-    url = "https://api.kickbase.com/v4/user/login"
-    payload = {
-        "email": KB_EMAIL.strip(),
-        "password": KB_PASSWORD.strip(),
-        "extLogin": False
-    }
+    import os
+    import requests
+
+    email = os.environ.get("KB_EMAIL")
+    password = os.environ.get("KB_PASSWORD")
+
+    print("🚀 Starte Kickbase Login mit Android-Header...")
+
+    # Der zwingend erforderliche Android-Header
     headers = {
-        "Content-Type": "application/json; charset=utf-8",
-        "Accept": "application/json, text/plain, */*",
-        "Origin": "https://play.kickbase.com",
-        "Referer": "https://play.kickbase.com/"
+        "User-Agent": "Kickbase/8.10.0 (Android)",
+        "Content-Type": "application/json"
     }
-    
-    resp = requests.post(
-        url,
-        json=payload,
-        headers=headers,
-        impersonate="chrome",
-        timeout=CONFIG["REQUEST_TIMEOUT"]
-    )
-    
-    print(f"DEBUG API HTTP Status: {resp.status_code}")
-    print(f"DEBUG API Response Body: {resp.text}")
-    
-    if not resp.ok:
+
+    # Die neue Kickbase API-Struktur (em und pass)
+    body = {
+        "em": email,
+        "pass": password,
+        "loy": False,
+        "rep": {}
+    }
+
+    # API-Anfrage senden
+    resp = requests.post("https://api.kickbase.com/v4/user/login", json=body, headers=headers)
+
+    if resp.status_code != 200:
         raise ValueError(f"❌ Kickbase API Login-Fehler (HTTP {resp.status_code}): {resp.text}")
-        
+
     data = resp.json()
-    token = data.get("token")
-    leagues = data.get("leagues", [])
-    
-    if not token or not leagues:
-        raise ValueError("❌ Login-Antwort unvollständig (kein Token oder keine Liga erhalten).")
-    
-    league_id = leagues[0].get("id")
-    print(f"✅ Kickbase Login erfolgreich. Liga-ID: {league_id}")
-    return token, league_id
+    token = data.get("tkn")
+
+    # Liga-ID automatisch aus der neuen 'lins' Liste auslesen
+    league_id = None
+    if "lins" in data and len(data["lins"]) > 0:
+        league_id = data["lins"][0]["i"]
+
+    if not token or not league_id:
+         raise ValueError("❌ Konnte Token oder Liga-ID nicht auslesen.")
+
+    return token, str(league_id)
 
 def get_market_players(token, league_id):
     """ Holt alle aktuellen Transfermarkt-Spieler der Liga. """
