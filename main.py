@@ -4,16 +4,13 @@ import xml.etree.ElementTree as ET
 import re
 import json
 from datetime import datetime, date
+import google.generativeai as genai  # <-- Der neue VIP-Eingang zur KI!
 
-# Umgebungsvariablen
 KB_EMAIL = os.environ.get("KB_EMAIL")
 KB_PASSWORD = os.environ.get("KB_PASSWORD")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-
-# FIX 1: Wir zwingen Google, das garantiert funktionierende, neueste Flash-Modell zu nehmen
-GEMINI_MODEL = "gemini-pro"
 
 CONFIG = {
     "MAX_PER_TEAM": 2,
@@ -83,12 +80,12 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     trend_flag = p.get("mvt")
     tid = p.get("tid")
 
+    # Überprüfung auf beiden Kickbase-Ebenen (Markt-Übersicht UND Detail-Ebene)
     is_injured = False
-    if p_detail:
-        # FIX 2: Erweiterte Kickbase Status Codes (1=Verletzt, 2=Gesperrt, 4=Reha, 8=Abwesend)
-        st = str(p_detail.get("status", p_detail.get("st", "0")))
-        if st in ["1", "2", "4", "8"]:
-            is_injured = True
+    st_market = str(p.get("st", "0"))
+    st_detail = str(p_detail.get("status", p_detail.get("st", "0")) if p_detail else "0")
+    if st_market in ["1", "2", "4", "8"] or st_detail in ["1", "2", "4", "8"]:
+        is_injured = True
 
     matched_news = match_news_for_player(lastname, news_headlines)
     has_negative_news = any(
@@ -132,10 +129,10 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     reasons = []
     if trend_flag == 1: reasons.append("positiver Marktwert-Trend")
     elif trend_flag == 2: reasons.append("fallender Marktwert-Trend")
-    if is_injured: reasons.append("Verletzungs-/Sperrrisiko (Kickbase Status)")
+    if is_injured: reasons.append("Verletzungs-/Sperrrisiko (Kickbase)")
     if has_negative_news: reasons.append("kritische News bei LigaInsider")
     if mw_cycles > 0: reasons.append(f"{mw_cycles} Marktwert-Updates bis 1. Spieltag")
-    if violates_my_limit: reasons.append("überschreitet deine 2-Spieler-Regel")
+    if violates_my_limit: reasons.append("überschreitet 2-Spieler-Regel")
     if opponents_blocked: reasons.append("Gegner haben den Verein blockiert")
 
     return {
@@ -151,23 +148,21 @@ def get_llm_analysis(scored_players, cycles_info):
 
     players_json = json.dumps(scored_players, ensure_ascii=False, indent=2)
     prompt = f"""Du bist ein Kickbase-Experte. Ziel: Herbstmeister werden.
-Noch {cycles_info} Marktwert-Updates.
-Max 2 Spieler pro Verein, nie unter Marktwert bieten.
+Noch {cycles_info} Marktwert-Updates. Max 2 Spieler pro Verein, nie unter Marktwert bieten.
 
 Hier sind die aktuellen Marktspieler mit Analyse-Daten:
 {players_json}
 
-Gib für die 3-5 spannendsten/wichtigsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko). Antworte im Telegram-Markdown mit Bulletpoints. Keine Einleitung, direkt zur Sache."""
+Gib für die 3-5 spannendsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko). Antworte im Telegram-Markdown mit Bulletpoints. Keine Einleitung, direkt zur Sache."""
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    # Nutzung der offiziellen Google-Bibliothek
     try:
-        res = requests.post(url, params={"key": GEMINI_API_KEY}, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=20)
-        data = res.json()
-        if "error" in data:
-            return f"❌ Google API Fehler: {data['error'].get('message', 'Unbekannter Fehler')}"
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        return response.text
     except Exception as e:
-        return f"❌ Netzwerk-Fehler: {e}"
+        return f"❌ KI-Fehler: {e}"
 
 def main():
     headers = {"User-Agent": "Kickbase/6.8.0 (iPhone; iOS 16.5; Scale/3.00)", "Content-Type": "application/json"}
@@ -214,9 +209,10 @@ def main():
             if eval_result["reason"]:
                 msg += f"  ℹ️ *Begründung:* {eval_result['reason']}\n"
 
-            # FIX 2 in der Nachrichtenausgabe: Trigger für ALLE negativen Status-Codes
-            st = str(p_detail.get("status", p_detail.get("st", "0")))
-            if st in ["1", "2", "4", "8"]:
+            # Check, ob er verletzt/gesperrt ist (wird jetzt absolut narrensicher abgegriffen)
+            st_market = str(p.get("st", "0"))
+            st_detail = str(p_detail.get("status", p_detail.get("st", "0")) if p_detail else "0")
+            if st_market in ["1", "2", "4", "8"] or st_detail in ["1", "2", "4", "8"]:
                 msg += "  🩹 *Status: Verletzt / Reha / Gesperrt*\n"
 
             if p.get("tid") in blocked_teams:
