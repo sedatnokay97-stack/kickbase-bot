@@ -85,9 +85,10 @@ TEAM_LINEUP_SLUGS = {
 BUNDESLIGA_TEAM_KEYS = list(TEAM_LINEUP_SLUGS.keys())
 
 # Manuell verifizierte Zuordnung Kickbase-interne tid -> Team-Key.
-# 11 von 18 Vereinen bestaetigt. Offen: bayern, dortmund, schalke, hamburg,
-# augsburg, paderborn, elversberg sowie tid=2 (noch ungeklaert).
+# 12 von 18 Vereinen bestaetigt. Offen: dortmund, schalke, hamburg,
+# augsburg, paderborn, elversberg.
 KICKBASE_TID_TO_TEAM = {
+    2: "bayern",
     4: "frankfurt",
     5: "freiburg",
     7: "leverkusen",
