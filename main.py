@@ -23,7 +23,8 @@ CONFIG = {
     "REQUEST_TIMEOUT": 15,
     "DAYS_UNTIL_MATCHDAY": 11,
     "OVERPAY_RISK_FACTOR": 0.60,
-    "HISTORY_FILE": "history.json"
+    "HISTORY_FILE": "history.json",
+    "MV_HISTORY_LENGTH": 5
 }
 
 # ==========================================
@@ -190,16 +191,38 @@ def save_history(history, sha=None):
         print(f"⚠️ History Speicherung fehlgeschlagen: {e}")
 
 def calculate_real_daily_trend(player_id, current_mv, history):
+    """
+    Ermittelt den taeglichen Marktwert-Trend robust ueber den MEDIAN mehrerer
+    Deltas (bis zu MV_HISTORY_LENGTH Messpunkte) statt nur des letzten
+    einzelnen Laufs - ein einzelner Ausreisser-Tag verzerrt die 11-Tage-Prognose
+    so nicht mehr so stark.
+
+    Migriert automatisch das alte Format {"mv": X} auf {"mv_history": [X, ...]}:
+    ein bereits vorhandener alter "mv"-Wert wird zum ersten Listeneintrag, statt
+    verloren zu gehen.
+    """
     player_id_str = str(player_id)
     player_hist = history.get(player_id_str, {})
-    previous_mv = player_hist.get("mv")
-    
-    if previous_mv is not None and previous_mv > 0:
-        daily_trend = current_mv - previous_mv
+
+    mv_history = player_hist.get("mv_history")
+    if mv_history is None:
+        old_mv = player_hist.get("mv")
+        mv_history = [old_mv] if old_mv is not None and old_mv > 0 else []
+    else:
+        mv_history = list(mv_history)  # Kopie, um das Original nicht versehentlich zu mutieren
+
+    if len(mv_history) >= 2:
+        deltas = sorted(mv_history[i] - mv_history[i - 1] for i in range(1, len(mv_history)))
+        daily_trend = deltas[len(deltas) // 2]  # Median der letzten Deltas
+    elif len(mv_history) == 1:
+        daily_trend = current_mv - mv_history[-1]
     else:
         daily_trend = 150000 if current_mv > 5000000 else 50000
 
-    history[player_id_str] = {"mv": current_mv}
+    mv_history.append(current_mv)
+    mv_history = mv_history[-CONFIG["MV_HISTORY_LENGTH"]:]
+
+    history[player_id_str] = {"mv_history": mv_history}
     return daily_trend
 
 def predict_mv_and_overpay(current_mv, daily_trend):
