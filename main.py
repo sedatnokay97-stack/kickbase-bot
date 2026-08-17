@@ -40,6 +40,12 @@ CONFIG = {
     "GEMINI_RETRY_DELAY": 5,
     "DEBUG_PLAYER_DETAIL": True,
     "STARTELF_HEURISTIC_ENABLED": True,
+    "OVERPAY_TIERS": [
+        (110, 0.30),
+        (60, 0.15),
+        (0, 0.08),
+    ],
+    "OVERPAY_CAP_RISKANT": 0.05,
 }
 
 NEWS_FEEDS = [
@@ -50,7 +56,6 @@ NEWS_FEEDS = [
 
 LIGAINSIDER_INJURY_URL = "https://www.ligainsider.de/bundesliga/verletzte-und-gesperrte-spieler/"
 
-# Kickbase-Teamname (klein geschrieben, Teilstring-Suche) -> LigaInsider Slug/ID fuer Saison 2026/27
 TEAM_LINEUP_SLUGS = {
     "bayern": "fc-bayern-muenchen/1",
     "werder": "sv-werder-bremen/2",
@@ -346,6 +351,14 @@ def extract_points(p, p_detail):
     return total_points, avg_points
 
 
+def get_overpay_pct(avg_points):
+    """Staffelt das erlaubte Overpay-Limit nach Punkte-Tier statt starrem Prozentwert."""
+    for threshold, pct in CONFIG["OVERPAY_TIERS"]:
+        if avg_points >= threshold:
+            return pct
+    return CONFIG["OVERPAY_TIERS"][-1][1]
+
+
 def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles, my_budget, lineup_names=None):
     lastname = p.get("n", "Unbekannt")
     mv = p.get("mv", 0)
@@ -419,14 +432,16 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
 
     if score >= 6 and not violates_my_limit and not is_injured and not has_negative_news:
         label = "TOP-KAUF"
-        max_bid = int(mv * 1.15)
     elif score >= 3:
         label = "SOLIDE"
-        max_bid = int(mv * 1.05)
     else:
         label = "RISKANT"
-        max_bid = int(mv * 1.00)
 
+    overpay_pct = get_overpay_pct(avg_points)
+    if label == "RISKANT":
+        overpay_pct = min(overpay_pct, CONFIG["OVERPAY_CAP_RISKANT"])
+
+    max_bid = int(mv * (1 + overpay_pct))
     max_bid = max(max_bid, mv)
 
     budget_exceeded = False
@@ -443,6 +458,7 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
         reasons.append(f"starke Punkteform (Ø {avg_points})")
     elif 0 < avg_points < 15:
         reasons.append(f"schwache Punkteform (Ø {avg_points})")
+    reasons.append(f"Overpay-Limit {int(round(overpay_pct * 100))}% (Punkte-Tier)")
     if predicted_starter is True:
         reasons.append("voraussichtlich in Startelf (LigaInsider, Heuristik)")
     elif predicted_starter is False:
