@@ -26,8 +26,55 @@ CONFIG = {
     "HISTORY_FILE": "history.json",
     "MV_HISTORY_LENGTH": 5,
     "MAX_PER_TEAM": 2,
-    "OPPONENT_FETCH_SLEEP": 0.3
+    "OPPONENT_FETCH_SLEEP": 0.3,
+    "SEASON_YEAR": 2026,  # naechstes Jahr manuell auf 2027 aendern
+    "FIXTURE_LOOKAHEAD": 3
 }
+
+# ==========================================
+# VEREINS-ZUORDNUNG (fuer Restprogramm/Gegnerstaerke)
+# ==========================================
+# Kickbase-interne tid -> Team-Key. tid kommt als STRING aus der API.
+# Manuell verifiziert: 12 von 18 Vereinen. Offen: dortmund, schalke, hamburg,
+# augsburg, paderborn, elversberg - fuer deren Spieler gibt es bis auf Weiteres
+# kein Restprogramm (kein Absturz, das Feld bleibt einfach leer).
+KICKBASE_TID_TO_TEAM = {
+    "2": "bayern",
+    "4": "frankfurt",
+    "5": "freiburg",
+    "7": "leverkusen",
+    "9": "stuttgart",
+    "10": "werder",
+    "14": "hoffenheim",
+    "15": "gladbach",
+    "18": "mainz",
+    "28": "koeln",
+    "40": "union berlin",
+    "43": "leipzig",
+}
+
+TEAM_STRENGTH_LAST_SEASON = {
+    "bayern": 89,
+    "dortmund": 73,
+    "leipzig": 65,
+    "stuttgart": 62,
+    "hoffenheim": 61,
+    "leverkusen": 59,
+    "freiburg": 47,
+    "frankfurt": 44,
+    "augsburg": 43,
+    "mainz": 40,
+    "union berlin": 39,
+    "gladbach": 38,
+    "hamburg": 38,
+    "koeln": 32,
+    "werder": 32,
+    "paderborn": 22,
+    "schalke": 20,
+    "elversberg": 20,
+}
+TEAM_STRENGTH_DEFAULT = 45
+BUNDESLIGA_TEAM_KEYS = list(TEAM_STRENGTH_LAST_SEASON.keys())
 
 # ==========================================
 # KNOTEN 1: KICKBASE LIVE API
@@ -58,7 +105,6 @@ def kickbase_login():
     if not token or not league_id:
          raise ValueError("❌ Konnte Token oder Liga-ID nicht auslesen.")
 
-    # Eigene Manager-ID auslesen (fuer Budget-Check und 2-Spieler-Regel).
     user_obj = data.get("u", {}) or {}
     my_user_id = user_obj.get("id") or user_obj.get("i")
     my_manager_id = user_obj.get("mid") or my_user_id
@@ -83,18 +129,15 @@ def get_market_players(token, league_id):
     resp.raise_for_status()
     data = resp.json()
 
-    # 1. Klassischer Weg
     if "players" in data and data["players"]:
         return data["players"]
 
-    # 2. Smart-Scan: Suche automatisch nach der Liste, die die Spieler enthält
     for key, value in data.items():
         if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
             if any(k in value[0] for k in ["id", "i", "n", "lastName", "mv"]):
                 print(f"🔍 Kickbase API Update umgangen: Spieler im neuen Ordner '{key}' gefunden!")
                 return value
 
-    # 3. Fallback
     print(f"⚠️ DEBUG RAW MARKTDATEN: {json.dumps(data)[:800]}")
     return []
 
@@ -117,7 +160,6 @@ def get_my_budget(token, league_id):
     return None
 
 def get_ranking(token, league_id):
-    """Liste aller Liga-Teilnehmer (fuer die Gegner-Analyse)."""
     try:
         resp = requests.get(
             f"https://api.kickbase.com/v4/leagues/{league_id}/ranking",
@@ -153,12 +195,6 @@ def count_players_by_team(squad_items):
     return counts
 
 def build_blocked_teams(token, league_id, ranking_res, my_manager_id):
-    """
-    Ermittelt, bei welchen Vereinen Konkurrenten die 2-Spieler-Regel schon
-    ausgereizt haben. Das ist keine Sperre fuer DICH, sondern eine Info: bei
-    diesen Vereinen faellt ein potenzieller Kaeufer aus dem Markt weg, was
-    den Marktwert-Anstieg fuer diese Spieler bremsen kann.
-    """
     blocked = {}
     users = ranking_res.get("users", []) if ranking_res else []
     for user in users:
@@ -216,13 +252,70 @@ def get_ligainsider_injuries():
     return injured
 
 # ==========================================
-# KNOTEN 3: HISTORY & PROGNOSE ENGINE
+# KNOTEN 3: RESTPROGRAMM / GEGNERSTAERKE (OpenLigaDB)
+# ==========================================
+def get_season_fixtures():
+    """Laedt den kompletten Saison-Spielplan ueber die freie OpenLigaDB-API."""
+    url = f"https://api.openligadb.de/getmatchdata/bl1/{CONFIG['SEASON_YEAR']}"
+    try:
+        resp = requests.get(url, timeout=CONFIG["REQUEST_TIMEOUT"])
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"⚠️ OpenLigaDB-Spielplan konnte nicht geladen werden: {e}")
+        return []
+
+def get_team_key(team_name):
+    """Matched einen OpenLigaDB-Teamnamen auf einen der 18 festen Team-Keys."""
+    if not team_name:
+        return None
+    name_lower = team_name.lower()
+    if "köln" in name_lower or "koeln" in name_lower:
+        return "koeln"
+    for key in BUNDESLIGA_TEAM_KEYS:
+        if key in name_lower:
+            return key
+    return None
+
+def get_upcoming_opponents(fixtures, team_key, count):
+    upcoming = []
+    for m in fixtures:
+        if m.get("matchIsFinished"):
+            continue
+        t1 = (m.get("team1") or {}).get("teamName", "")
+        t2 = (m.get("team2") or {}).get("teamName", "")
+        k1 = get_team_key(t1)
+        k2 = get_team_key(t2)
+        if k1 == team_key and k2:
+            upcoming.append((m.get("matchDateTimeUTC", ""), k2, t2))
+        elif k2 == team_key and k1:
+            upcoming.append((m.get("matchDateTimeUTC", ""), k1, t1))
+    upcoming.sort(key=lambda x: x[0])
+    return upcoming[:count]
+
+def fixture_difficulty(fixtures, team_key):
+    """Bewertet das Restprogramm anhand der Vorsaison-Staerke der naechsten Gegner."""
+    if not team_key or not fixtures:
+        return None
+    opponents = get_upcoming_opponents(fixtures, team_key, CONFIG["FIXTURE_LOOKAHEAD"])
+    if not opponents:
+        return None
+    strengths = [TEAM_STRENGTH_LAST_SEASON.get(k, TEAM_STRENGTH_DEFAULT) for _, k, _ in opponents]
+    avg_strength = sum(strengths) / len(strengths)
+    opponent_names = [name.split()[-1] for _, _, name in opponents if name]
+    if avg_strength <= 35:
+        label = "leicht"
+    elif avg_strength <= 55:
+        label = "mittel"
+    else:
+        label = "schwer"
+    return {"label": label, "opponents": opponent_names}
+
+# ==========================================
+# KNOTEN 4: HISTORY & PROGNOSE ENGINE
 # ==========================================
 def load_history():
-    """
-    Laedt den Verlauf primaer aus dem GitHub-Repo (ueberlebt GitHub-Actions-Runs),
-    mit Fallback auf eine lokale Datei fuer Tests ausserhalb von Actions.
-    """
     if GITHUB_TOKEN and GITHUB_REPOSITORY:
         url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/{CONFIG['HISTORY_FILE']}"
         headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
@@ -252,7 +345,6 @@ def load_history():
 
 
 def save_history(history, sha=None):
-    """Speichert den Verlauf dorthin zurueck, wo er geladen wurde (GitHub oder lokale Datei)."""
     content_str = json.dumps(history, indent=2, ensure_ascii=False)
 
     if GITHUB_TOKEN and GITHUB_REPOSITORY:
@@ -281,15 +373,6 @@ def save_history(history, sha=None):
         print(f"⚠️ History Speicherung fehlgeschlagen: {e}")
 
 def calculate_real_daily_trend(player_id, current_mv, history):
-    """
-    Ermittelt den taeglichen Marktwert-Trend robust ueber den MEDIAN mehrerer
-    Deltas (bis zu MV_HISTORY_LENGTH Messpunkte) statt nur des letzten
-    einzelnen Laufs - ein einzelner Ausreisser-Tag verzerrt die 11-Tage-Prognose
-    so nicht mehr so stark.
-
-    Migriert automatisch das alte Format {"mv": X} auf {"mv_history": [X, ...]},
-    falls noch alte Eintraege vorliegen.
-    """
     player_id_str = str(player_id)
     player_hist = history.get(player_id_str, {})
 
@@ -330,7 +413,7 @@ def predict_mv_and_overpay(current_mv, daily_trend):
     max_bid = current_mv + int(projected_growth * CONFIG["OVERPAY_RISK_FACTOR"])
     return projected_mv, max_bid, int(projected_growth)
 
-def evaluate_player(player, history, starters, injured_list, my_team_counts=None, blocked_teams=None, my_budget=None):
+def evaluate_player(player, history, starters, injured_list, my_team_counts=None, blocked_teams=None, my_budget=None, fixture_info=None):
     player_id = player.get("id", player.get("i"))
     tid = player.get("tid")
 
@@ -379,11 +462,13 @@ def evaluate_player(player, history, starters, injured_list, my_team_counts=None
         "violates_my_limit": violates_my_limit,
         "opponents_with_team_blocked": opponents_with_team_blocked,
         "budget_exceeded": budget_exceeded,
-        "recommendation": recommendation
+        "recommendation": recommendation,
+        "fixture_difficulty": fixture_info["label"] if fixture_info else None,
+        "fixture_opponents": fixture_info["opponents"] if fixture_info else []
     }
 
 # ==========================================
-# KNOTEN 4: TELEGRAM DISPATCHER & SPLITTER
+# KNOTEN 5: TELEGRAM DISPATCHER & SPLITTER
 # ==========================================
 def split_telegram_message(message, max_len):
     chunks = []
@@ -473,6 +558,10 @@ def main():
     my_team_counts = get_my_team_counts(token, league_id, my_manager_id)
     blocked_teams = build_blocked_teams(token, league_id, ranking_res, my_manager_id)
 
+    season_fixtures = get_season_fixtures()
+    fixture_cache = {}
+    unmapped_tids_seen = set()
+
     evaluated_list = []
     report_lines = [f"⚽ <b>Kickbase Markt-Report ({CONFIG['DAYS_UNTIL_MATCHDAY']} Tage bis Spieltag 1)</b>\n"]
     if my_budget is not None:
@@ -480,7 +569,17 @@ def main():
         report_lines.append(f"💳 <b>Verfuegbares Budget:</b> {budget_str} €\n")
 
     for p in raw_players:
-        res = evaluate_player(p, history, starters, injured, my_team_counts, blocked_teams, my_budget)
+        tid_str = str(p.get("tid")) if p.get("tid") else None
+        team_key = KICKBASE_TID_TO_TEAM.get(tid_str) if tid_str else None
+        if tid_str and not team_key and tid_str not in unmapped_tids_seen:
+            print(f"ℹ️ Team-ID {tid_str} noch nicht zugeordnet (Spieler: {p.get('n')}) - kein Restprogramm fuer diesen Verein.")
+            unmapped_tids_seen.add(tid_str)
+
+        if team_key and team_key not in fixture_cache:
+            fixture_cache[team_key] = fixture_difficulty(season_fixtures, team_key)
+        fixture_info = fixture_cache.get(team_key) if team_key else None
+
+        res = evaluate_player(p, history, starters, injured, my_team_counts, blocked_teams, my_budget, fixture_info)
         evaluated_list.append(res)
 
         profit_formatted = f"+{res['exp_profit']:,}".replace(",", ".")
@@ -493,6 +592,9 @@ def main():
             status_icons += " | 🚑 Verletzt"
 
         extra_lines = ""
+        if res["fixture_difficulty"]:
+            opp_str = ", ".join(res["fixture_opponents"]) if res["fixture_opponents"] else "?"
+            extra_lines += f"  📅 Restprogramm: {res['fixture_difficulty'].capitalize()} (naechste Gegner: {opp_str})\n"
         if res["violates_my_limit"]:
             extra_lines += "  🚫 Ueberschreitet deine 2-Spieler-Regel\n"
         if res["opponents_with_team_blocked"]:
