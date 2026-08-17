@@ -501,7 +501,9 @@ def main():
             first_squad_player.get("id")
             or first_squad_player.get("pid")
             or first_squad_player.get("i")
+            or first_squad_player.get("pi")
         )
+        print("DEBUG: Ermittelte Player-ID:", debug_player_id)
     except Exception as e:
         debug_player_id = None
         print("Fehler beim Laden des eigenen Kaders fuer Debug:", e)
