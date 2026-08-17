@@ -8,30 +8,21 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 def get_ligainsider_news():
-    print("⏳ Hole LigaInsider RSS-News...")
     news_items = []
     try:
         url = "https://www.ligainsider.de/rss/news.xml"
-        # Etwas "menschlicherer" User-Agent
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"}
-        res = requests.get(url, headers=headers, timeout=10)
-        
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=5)
         if res.status_code == 200:
             root = ET.fromstring(res.text)
             for item in root.findall(".//item"):
                 title = item.find("title").text if item.find("title") is not None else ""
                 link = item.find("link").text if item.find("link") is not None else ""
                 news_items.append({"title": title, "link": link})
-            print(f"✅ Erfolg: {len(news_items)} News-Artikel vom Feed geladen.")
-        else:
-            print(f"⚠️ Feed-Fehler: Status-Code {res.status_code}")
-            
-    except Exception as e:
-        print(f"❌ Fehler beim News-Abruf: {e}")
+    except: pass
     return news_items
 
 def main():
-    print("▶️ Starte Markt-Abruf inkl. Gegner-Sperren & LigaInsider-Debug...")
     headers = {
         "User-Agent": "Kickbase/6.8.0 (iPhone; iOS 16.5; Scale/3.00)",
         "Content-Type": "application/json",
@@ -40,49 +31,55 @@ def main():
     payload = {"em": KB_EMAIL, "pass": KB_PASSWORD, "loy": False, "rep": {}}
     
     try:
-        # 1. Login
         login_res = requests.post("https://api.kickbase.com/v4/user/login", json=payload, headers=headers).json()
         token = login_res.get("tkn")
         liga_id = login_res.get("srvl", [])[0].get("id")
-        
         headers["Authorization"] = f"Bearer {token}"
         
-        # 2. News holen
         news_items = get_ligainsider_news()
         
-        # 3. Markt holen
-        print("⏳ Lade Transfermarkt...")
+        # Radar & Markt
+        ranking_res = requests.get(f"https://api.kickbase.com/v4/leagues/{liga_id}/ranking", headers=headers).json()
         market_res = requests.get(f"https://api.kickbase.com/v4/leagues/{liga_id}/market", headers=headers).json()
-        players = market_res.get("it", [])
+        players = sorted(market_res.get("it", []), key=lambda x: x.get("exs", 999999))
         
-        # 4. Telegram-Nachricht bauen
-        msg = "⚽ *Markt-Update: News-Check*\n\n"
-        
+        # Hier die Sperren-Logik (wie gehabt)
+        blocked_teams = {}
+        for user in ranking_res.get("users", []):
+            if user.get("id") == login_res.get("u", {}).get("i"): continue
+            squad = requests.get(f"https://api.kickbase.com/v4/leagues/{liga_id}/users/{user.get('id')}/squad", headers=headers).json().get("it", [])
+            counts = {}
+            for sp in squad:
+                tid = sp.get("tid")
+                counts[tid] = counts.get(tid, 0) + 1
+            for tid, count in counts.items():
+                if count >= 2: blocked_teams.setdefault(tid, []).append(user.get("name"))
+
+        # Nachricht
+        msg = "⚽ *Markt-Update: Kickbase Elite*\n\n"
         for p in players[:7]:
             nachname = p.get("n", "Unbekannt")
-            msg += f"• *{nachname}*\n"
+            mw = f"{p.get('mv', 0):,}".replace(",", ".")
+            trend = "📈" if p.get("mvt") == 1 else "📉" if p.get("mvt") == 2 else "➖"
+            exs = p.get("exs", 0)
+            time_str = f"{exs//3600}h {(exs%3600)//60}m" if exs > 0 else "Abgelaufen"
             
-            # Debug: Suche nach diesem Nachnamen in den News
-            found_news = []
+            msg += f"• *{nachname}* {trend} | 💰 {mw} € | ⏳ {time_str}\n"
+            if p.get("tid") in blocked_teams:
+                msg += f"  🚫 *Sperre:* {', '.join(blocked_teams[p.get('tid')])}\n"
+            
+            # News nur wenn Treffer
             for n in news_items:
-                if nachname.lower() in n["title"].lower():
-                    found_news.append(n)
+                if nachname.lower() in n["title"].lower() and len(nachname) > 3:
+                    msg += f"  📰 [{n['title']}]({n['link']})\n"
+                    break
+            msg += "\n"
             
-            if found_news:
-                msg += f"  📰 *News gefunden:* {found_news[0]['title']}\n"
-                print(f"✅ Match gefunden für {nachname}: {found_news[0]['title']}")
-            else:
-                msg += "  (Keine aktuellen News)\n"
-                
         send_telegram(msg)
-        print("✅ Nachricht gesendet!")
-        
-    except Exception as e:
-        print(f"❌ Fehler: {str(e)}")
+    except: pass
 
 def send_telegram(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": True})
+    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": True})
 
 if __name__ == "__main__":
     main()
