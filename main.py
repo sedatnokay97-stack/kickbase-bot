@@ -567,6 +567,14 @@ def evaluate_player(player, detail, headlines, blocked_teams, my_team_counts, cy
     if opponent_blocked: reasons.append("Gegner haben den Verein blockiert")
     if budget_exceeded: reasons.append("Gebot uebersteigt Budget")
 
+    # Trading-Urgency berechnen
+    urgency_score = 0
+    if cycles >= 10 and trend == 1: urgency_score += 2
+    if fixture and fixture["label"] == "leicht": urgency_score += 1
+    if starter is True: urgency_score += 1
+    if mv_acceleration == "beschleunigt": urgency_score += 1
+    urgency_label = "KAUF JETZT" if urgency_score >= 4 else "BEOBACHTEN" if urgency_score >= 2 else "ABWARTEN"
+
     return {
         "label": label, "reason": ", ".join(reasons) or "keine besonderen Risiken",
         "max_bid": max_bid, "matched_news": [item.get("headline", "") for item in matched[:3]],
@@ -574,13 +582,24 @@ def evaluate_player(player, detail, headlines, blocked_teams, my_team_counts, cy
         "budget_exceeded": budget_exceeded, "predicted_starter": starter,
         "fixture_difficulty": fixture["label"] if fixture else None,
         "all_negative_headlines": fresh_negative + aged_negative,
+        "urgency": urgency_label,
     }
 
 
 def get_llm_analysis(scored_players, cycles):
     if not GEMINI_API_KEY:
         return "KI-Analyse nicht verfuegbar: GEMINI_API_KEY fehlt."
-    prompt = f'''Du bist Kickbase-Experte. Noch {cycles} Marktwert-Updates. Maximal zwei Spieler pro Verein und nie unter Marktwert bieten. Bewerte die interessantesten 3 bis 5 Spieler anhand von Marktwert, Punkten, Startelf und Restprogramm. Antworte kurz in Fliesstext ohne Markdown. Daten: {json.dumps(scored_players, ensure_ascii=False)}'''
+    prompt = f'''Du bist Kickbase-Experte. Noch {cycles} Marktwert-Updates.
+
+Analysiere die Top-3-Spieler und gib klare Handlungsempfehlungen:
+- KAUFEN (mit max. Overpay %)
+- ABWARTEN
+- VERKAUFEN (wenn im Kader)
+
+Berücksichtige: Trend, Startelf, Restprogramm, Trading-Urgency.
+Antworte in maximal 3 Sätzen (unter 300 Zeichen).
+
+Daten: {json.dumps(scored_players, ensure_ascii=False)}'''
     try:
         return call_gemini(prompt, 700, 0.4)
     except Exception as exc:
@@ -687,10 +706,11 @@ def main():
         message += f"  ✅ <b>Einschaetzung:</b> {esc(result['label'])} (Max. Gebot: {result['max_bid']:,} EUR)\n".replace(",", ".")
         message += f"  📊 <b>Punkte:</b> {result['total_points']} (Durchschnitt {result['avg_points']})\n"
         message += f"  ℹ️ <b>Begruendung:</b> {esc(result['reason'])}\n"
+        message += f"  🎯 <b>Trading:</b> {esc(result['urgency'])}\n"
         for headline in result["matched_news"]:
             message += f"  📰 <b>News:</b> {esc(headline)}\n"
         message += "\n"
-        scored.append({"name": name, "marktwert": mv, "punkte": result["avg_points"], "startelf": result["predicted_starter"], "restprogramm": result["fixture_difficulty"], "einschaetzung": result["label"], "risiken": result["reason"]})
+        scored.append({"name": name, "marktwert": mv, "punkte": result["avg_points"], "startelf": result["predicted_starter"], "restprogramm": result["fixture_difficulty"], "einschaetzung": result["label"], "risiken": result["reason"], "urgency": result["urgency"]})
 
     message += "🤖 <b>KI-Manager-Einschaetzung:</b>\n" + esc(get_llm_analysis(scored, cycles))
     send_telegram_messages(message)
