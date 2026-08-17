@@ -43,6 +43,7 @@ CONFIG = {
     "FIXTURE_DIFFICULTY_ENABLED": True,
     "FIXTURE_LOOKAHEAD": 3,
     "SEASON_YEAR": 2026,
+    "COMPETITION_ID": "1",
     "OVERPAY_TIERS": [
         (110, 0.30),
         (60, 0.15),
@@ -83,8 +84,6 @@ TEAM_LINEUP_SLUGS = {
 
 BUNDESLIGA_TEAM_KEYS = list(TEAM_LINEUP_SLUGS.keys())
 
-# Staerke-Proxy: Punkte der Abschlusstabelle 2025/26. Aufsteiger (Schalke, Elversberg, Paderborn)
-# erhalten einen konservativen Baseline-Wert, da sie in der 1. Bundesliga noch keine Referenz haben.
 TEAM_STRENGTH_LAST_SEASON = {
     "bayern": 89,
     "dortmund": 73,
@@ -265,10 +264,13 @@ def get_my_budget(liga_id):
     return None
 
 
-def get_team_names(liga_id):
-    """Liest tid -> Vereinsname direkt aus der Kickbase-API (/leagues/{id}/teams)."""
+def get_team_names():
+    """Liest tid -> Vereinsname ueber den Competition-Endpoint (/v4/competitions/{id}/teams)."""
     try:
-        res = session.get(f"https://api.kickbase.com/v4/leagues/{liga_id}/teams", timeout=CONFIG["REQUEST_TIMEOUT"])
+        res = session.get(
+            f"https://api.kickbase.com/v4/competitions/{CONFIG['COMPETITION_ID']}/teams",
+            timeout=CONFIG["REQUEST_TIMEOUT"],
+        )
         res.raise_for_status()
         data = res.json()
         items = data.get("it", data) if isinstance(data, dict) else data
@@ -696,7 +698,7 @@ def main():
     my_budget = get_my_budget(liga_id)
     mw_cycles = market_updates_until_first_matchday()
 
-    team_names = get_team_names(liga_id) if CONFIG["STARTELF_HEURISTIC_ENABLED"] else {}
+    team_names = get_team_names() if CONFIG["STARTELF_HEURISTIC_ENABLED"] or CONFIG["FIXTURE_DIFFICULTY_ENABLED"] else {}
     lineup_cache = {}
 
     season_fixtures = get_season_fixtures() if CONFIG["FIXTURE_DIFFICULTY_ENABLED"] else []
