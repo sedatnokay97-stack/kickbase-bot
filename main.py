@@ -57,7 +57,15 @@ NEWS_FEEDS = [
 # LigaInsider Verletzten-/Sperren-Liste (HTML-Scraping)
 LIGAINSIDER_INJURY_URL = "https://www.ligainsider.de/bundesliga/verletzte-und-gesperrte-spieler/"
 
-# HTTP-Session
+# Browser-User-Agent für News-Requests (verhindert Bot-Blockaden)
+NEWS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    )
+}
+
+# HTTP-Session (fuer Kickbase-API)
 session = requests.Session()
 session.headers.update({
     "User-Agent": "Kickbase/6.8.0 (iPhone; iOS 16.5; Scale/3.00)",
@@ -76,27 +84,36 @@ def esc(value) -> str:
 
 def get_ligainsider_injury_news():
     """
-    Scraped die LigaInsider-Seite 'Verletzte und gesperrte Spieler' und baut Headlines
-    im Format 'Spieler: letzte News zu diesem Status'.
+    Scraped die LigaInsider-Seite 'Verletzte und gesperrte Spieler'.
+    Die Seite nutzt keine <table>, sondern fett gedruckte Spielernamen
+    (<b>/<strong>) mit umgebendem Verletzungstext.
     """
     headlines = []
+    skip_labels = {"spieler", "grund", "letzte news zu diesem status", "fehlt seit:", "fehlt seit"}
+
     try:
-        res = session.get(LIGAINSIDER_INJURY_URL, timeout=CONFIG["REQUEST_TIMEOUT"])
+        res = requests.get(
+            LIGAINSIDER_INJURY_URL,
+            headers=NEWS_HEADERS,
+            timeout=CONFIG["REQUEST_TIMEOUT"],
+        )
         res.raise_for_status()
         res.encoding = "utf-8"
         soup = BeautifulSoup(res.text, "html.parser")
 
-        table = soup.find("table")
-        if table:
-            for row in table.find_all("tr"):
-                cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-                if len(cells) >= 3:
-                    player = cells[0]
-                    last_news = cells[2]
-                    if player and last_news and player.lower() != "spieler":
-                        headlines.append(f"{player}: {last_news}")
-        else:
-            print("Warnung: Keine Tabelle auf LigaInsider-Verletztenseite gefunden.")
+        bold_tags = soup.find_all(["b", "strong"])
+        for tag in bold_tags:
+            name = tag.get_text(strip=True)
+            if not name or name.lower() in skip_labels:
+                continue
+            if len(name.split()) < 2:
+                continue  # nur echte Vor+Nachname-Kombinationen
+
+            parent = tag.find_parent(["div", "li", "tr", "p"]) or tag.parent
+            full_text = parent.get_text(" ", strip=True)
+            if full_text:
+                headlines.append(full_text)
+
     except Exception as e:
         print(f"Warnung: LigaInsider-Verletztenseite konnte nicht geladen werden: {e}")
 
@@ -113,10 +130,10 @@ def get_news():
     """
     headlines = []
 
-    # 1) RSS-Feeds
+    # 1) RSS-Feeds (mit Browser-User-Agent gegen Bot-Blockaden)
     for url in NEWS_FEEDS:
         try:
-            res = requests.get(url, timeout=CONFIG["REQUEST_TIMEOUT"])
+            res = requests.get(url, headers=NEWS_HEADERS, timeout=CONFIG["REQUEST_TIMEOUT"])
             res.raise_for_status()
             res.encoding = "utf-8"
             try:
