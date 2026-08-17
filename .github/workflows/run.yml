@@ -1,25 +1,30 @@
 name: Kickbase 12h Bot
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: '0 */12 * * *' # Alle 12 Stunden automatisch
-  workflow_dispatch: # Erlaubt manuelles Testen per Klick
+    - cron: '0 */4 * * *'  # Läuft alle 4 Stunden automatisch
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - name: Python einrichten
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      - name: Pakete installieren
-        run: pip install kickbase-api requests
-      - name: Skript ausführen
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run script
         env:
           KB_EMAIL: ${{ secrets.KB_EMAIL }}
           KB_PASSWORD: ${{ secrets.KB_PASSWORD }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python main.py
