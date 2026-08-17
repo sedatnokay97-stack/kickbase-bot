@@ -36,13 +36,12 @@ CONFIG = {
     "WINTER_WARNING_DAYS": 14,
     "MW_UPDATE_HOUR_UTC": 20,
     "PLAYERS_TO_SHOW": 15,
-    "REQUEST_TIMEOUT": 10,
-    "TELEGRAM_MAX_LEN": 5000,
+    "REQUEST_TIMEOUT": 15,
+    "TELEGRAM_MAX_LEN": 4090,
     "GEMINI_MODEL": "gemini-3.6-flash",
     "GEMINI_FALLBACK_MODEL": "gemini-2.0-flash",
     "GEMINI_MAX_RETRIES": 1,
     "GEMINI_RETRY_DELAY": 5,
-    "DEBUG_PLAYER_DETAIL": True,
     "STARTELF_HEURISTIC_ENABLED": True,
     "FIXTURE_DIFFICULTY_ENABLED": True,
     "FIXTURE_LOOKAHEAD": 3,
@@ -50,11 +49,10 @@ CONFIG = {
     "COMPETITION_ID": "1",
     "NEWS_FILTER_WITH_GEMINI": True,
     "NEWS_AGING_ENABLED": True,
-    "OPPONENT_BUDGET_TRACKING_ENABLED": False,
     "HISTORY_FILE_PATH": "history.json",
     "MV_HISTORY_MAX_ENTRIES": 6,
     "KB_RETRY_ATTEMPTS": 3,
-    "DRY_RUN": os.environ.get("DRY_RUN", "false").lower() == "true",
+    "DRY_RUN": os.environ.get("DRY_RUN", "false").strip().lower() == "true",
     "OVERPAY_TIERS": [(110, 0.30), (60, 0.15), (0, 0.08)],
     "OVERPAY_CAP_RISKANT": 0.05,
 }
@@ -65,6 +63,9 @@ NEWS_FEEDS = [
     "https://www.sportschau.de/fussball/bundesliga/index~rss2.xml",
 ]
 LIGAINSIDER_INJURY_URL = "https://www.ligainsider.de/bundesliga/verletzte-und-gesperrte-spieler/"
+NEWS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36"
+}
 
 TEAM_LINEUP_SLUGS = {
     "bayern": "fc-bayern-muenchen/1", "werder": "sv-werder-bremen/2",
@@ -106,7 +107,6 @@ LINEUP_SKIP_PHRASES = {
     "kader", "heimspiel gegen", "auswartsspiel gegen", "torhueter",
     "abwehrspieler", "mittelfeldspieler", "stuermer", "legende",
 }
-NEWS_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"}
 
 session = requests.Session()
 session.headers.update({
@@ -120,36 +120,22 @@ def esc(value):
 
 
 def kb_get(url, **kwargs):
-    """GET mit Retry/Backoff; permanente 4xx-Fehler werden nicht wiederholt."""
     timeout = kwargs.pop("timeout", CONFIG["REQUEST_TIMEOUT"])
-
     for attempt in range(CONFIG["KB_RETRY_ATTEMPTS"]):
         try:
             response = session.get(url, timeout=timeout, **kwargs)
             response.raise_for_status()
             return response
-
         except requests.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else None
-
             if status_code is not None and 400 <= status_code < 500 and status_code != 429:
-                print(f"Info: Request nicht verfügbar ({status_code}) {url}; kein Retry.")
+                print(f"Info: Request nicht verfuegbar ({status_code}) {url}; kein Retry.")
                 return None
-
-            print(
-                f"Warnung: Request fehlgeschlagen "
-                f"({attempt + 1}/{CONFIG['KB_RETRY_ATTEMPTS']}) {url}: {exc}"
-            )
-
+            print(f"Warnung: Request fehlgeschlagen ({attempt + 1}/{CONFIG['KB_RETRY_ATTEMPTS']}) {url}: {exc}")
         except requests.RequestException as exc:
-            print(
-                f"Warnung: Request fehlgeschlagen "
-                f"({attempt + 1}/{CONFIG['KB_RETRY_ATTEMPTS']}) {url}: {exc}"
-            )
-
+            print(f"Warnung: Request fehlgeschlagen ({attempt + 1}/{CONFIG['KB_RETRY_ATTEMPTS']}) {url}: {exc}")
         if attempt < CONFIG["KB_RETRY_ATTEMPTS"] - 1:
             time.sleep(2 ** attempt)
-
     return None
 
 
@@ -183,7 +169,8 @@ def save_history(history, sha):
     if sha:
         payload["sha"] = sha
     try:
-        requests.put(url, headers=headers, json=payload, timeout=CONFIG["REQUEST_TIMEOUT"]).raise_for_status()
+        response = requests.put(url, headers=headers, json=payload, timeout=CONFIG["REQUEST_TIMEOUT"])
+        response.raise_for_status()
     except Exception as exc:
         print(f"Warnung: history.json konnte nicht gespeichert werden: {exc}")
 
@@ -267,37 +254,22 @@ def get_my_budget(liga_id):
 
 
 def get_team_names():
-    """
-    Verwendet immer die statische, bekannte tid-Zuordnung.
-    Der undokumentierte Teams-Endpunkt dient nur als optionales Enrichment.
-    """
     names = dict(KICKBASE_TID_TO_TEAM)
-
-    url = f"https://api.kickbase.com/v4/competitions/{CONFIG['COMPETITION_ID']}/teams"
-    response = kb_get(url)
-
+    response = kb_get(f"https://api.kickbase.com/v4/competitions/{CONFIG['COMPETITION_ID']}/teams")
     if not response:
-        print("Info: Team-Endpunkt nicht verfügbar; nutze statische Team-Zuordnung.")
+        print("Info: Team-Endpunkt nicht verfuegbar; nutze statische Team-Zuordnung.")
         return names
-
     try:
         data = response.json()
         items = data.get("it", data) if isinstance(data, dict) else data
-
         if isinstance(items, list):
             for item in items:
                 tid = item.get("id") or item.get("tid")
                 name = item.get("name") or item.get("nm") or item.get("n")
-
                 if tid and name:
                     names[str(tid)] = name
-
     except (ValueError, TypeError) as exc:
-        print(
-            "Info: Team-Endpunkt konnte nicht ausgewertet werden; "
-            f"nutze statische Zuordnung: {exc}"
-        )
-
+        print(f"Info: Team-Endpunkt konnte nicht ausgewertet werden: {exc}")
     return names
 
 
@@ -407,59 +379,24 @@ def call_gemini(prompt, max_tokens, temperature):
 
 
 def filter_news_with_gemini(headlines, names):
-    """
-    Best-effort-News-Zuordnung via Gemini.
-    Bei ungultigem Modell-JSON wird automatisch der Regex-Fallback verwendet.
-    """
-    if not GEMINI_API_KEY or not headlines or not names:
+    if not CONFIG["NEWS_FILTER_WITH_GEMINI"] or not GEMINI_API_KEY or not headlines or not names:
         return {}
-
-    prompt = f'''Ordne nur eindeutig passende Fussball-Schlagzeilen den folgenden
-Kickbase-Spieler-Nachnamen zu und bewerte jeden Treffer als positiv, negativ oder neutral.
-
-Antworte ausschließlich mit valide parsebarem JSON:
-{{"Nachname": [{{"headline": "...", "sentiment": "negativ"}}]}}
-
-Wichtig:
-- Kein Markdown.
-- Kein erklärender Text vor oder nach dem JSON.
-- Keine Zeilenumbruche innerhalb eines JSON-Strings.
-- Spieler ohne Treffer weglassen.
-
-Spieler: {", ".join(names)}
-
-Schlagzeilen:
-{json.dumps(headlines, ensure_ascii=False)}'''
-
+    prompt = f'''Ordne nur eindeutig passende Fussball-Schlagzeilen den folgenden Kickbase-Spieler-Nachnamen zu und bewerte jeden Treffer als positiv, negativ oder neutral. Antworte ausschliesslich mit valide parsebarem JSON: {{"Nachname": [{{"headline": "...", "sentiment": "negativ"}}]}}. Spieler: {", ".join(names)}. Schlagzeilen: {json.dumps(headlines, ensure_ascii=False)}'''
     try:
         raw = call_gemini(prompt, 1000, 0.1).strip()
-        raw = re.sub(
-            r"^```(?:json)?\s*|\s*```$",
-            "",
-            raw,
-            flags=re.IGNORECASE,
-        ).strip()
-
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE).strip()
         try:
             result = json.loads(raw)
         except json.JSONDecodeError:
             start = raw.find("{")
             end = raw.rfind("}")
-
             if start < 0 or end <= start:
                 print("Info: Gemini-News-Filter liefert kein JSON; Regex-Fallback aktiv.")
                 return {}
-
             result = json.loads(raw[start:end + 1])
-
         return result if isinstance(result, dict) else {}
-
-    except (json.JSONDecodeError, ValueError, TypeError) as exc:
-        print(f"Info: Gemini-News-Filter liefert kein verwertbares JSON; Regex-Fallback aktiv: {exc}")
-        return {}
-
     except Exception as exc:
-        print(f"Info: Gemini-News-Filter nicht verfügbar; Regex-Fallback aktiv: {exc}")
+        print(f"Info: Gemini-News-Filter nicht verfuegbar; Regex-Fallback aktiv: {exc}")
         return {}
 
 
@@ -492,7 +429,7 @@ def extract_form_points(detail):
             values = [v for v in value if isinstance(v, (int, float))]
             if values:
                 return sum(values) / len(values)
-        if isinstance(value, (int, float)):
+        elif isinstance(value, (int, float)):
             return value
     return None
 
@@ -567,7 +504,6 @@ def evaluate_player(player, detail, headlines, blocked_teams, my_team_counts, cy
     if opponent_blocked: reasons.append("Gegner haben den Verein blockiert")
     if budget_exceeded: reasons.append("Gebot uebersteigt Budget")
 
-    # Trading-Urgency berechnen
     urgency_score = 0
     if cycles >= 10 and trend == 1: urgency_score += 2
     if fixture and fixture["label"] == "leicht": urgency_score += 1
@@ -589,76 +525,110 @@ def evaluate_player(player, detail, headlines, blocked_teams, my_team_counts, cy
 def get_llm_analysis(scored_players, cycles):
     if not GEMINI_API_KEY:
         return "KI-Analyse nicht verfuegbar: GEMINI_API_KEY fehlt."
-    prompt = f'''Du bist Kickbase-Experte. Noch {cycles} Marktwert-Updates.
-
-Analysiere die Top-3-Spieler und gib klare Handlungsempfehlungen:
-- KAUFEN (mit max. Overpay %)
-- ABWARTEN
-- VERKAUFEN (wenn im Kader)
-
-Berücksichtige: Trend, Startelf, Restprogramm, Trading-Urgency.
-Antworte in maximal 3 Sätzen (unter 300 Zeichen).
-
-Daten: {json.dumps(scored_players, ensure_ascii=False)}'''
+    prompt = f'''Du bist Kickbase-Experte. Noch {cycles} Marktwert-Updates. Analysiere die Top-3-Spieler und gib klare Handlungsempfehlungen: KAUFEN, ABWARTEN oder VERKAUFEN. Beruecksichtige Trend, Startelf, Restprogramm und Trading-Urgency. Antworte in maximal 3 Saetzen unter 300 Zeichen. Daten: {json.dumps(scored_players, ensure_ascii=False)}'''
     try:
         return call_gemini(prompt, 700, 0.4)
     except Exception as exc:
         return f"KI-Analyse aktuell nicht verfuegbar ({type(exc).__name__})."
 
 
+def split_telegram_message(message, max_len):
+    chunks = []
+    current = ""
+
+    for line in message.splitlines():
+        line = line.rstrip()
+
+        while len(line) > max_len:
+            if current:
+                chunks.append(current)
+                current = ""
+
+            split_at = line.rfind(" ", 0, max_len)
+            if split_at <= 0:
+                split_at = max_len
+
+            chunks.append(line[:split_at])
+            line = line[split_at:].lstrip()
+
+        candidate = line if not current else f"{current}\n{line}"
+        if len(candidate) > max_len:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current = candidate
+
+    if current:
+        chunks.append(current)
+
+    return [chunk for chunk in chunks if chunk.strip()]
+
+
 def send_telegram_messages(message):
+    print(f"DEBUG Telegram: DRY_RUN={CONFIG['DRY_RUN']}")
+    print(f"DEBUG Telegram: CHAT_ID gesetzt={bool(TELEGRAM_CHAT_ID)}")
+    print(f"DEBUG Telegram: TOKEN gesetzt={bool(TELEGRAM_TOKEN)}")
+    print(f"DEBUG Telegram: Nachrichtzeichen={len(message)}")
+
     if CONFIG["DRY_RUN"]:
         print("DRY_RUN aktiv – Telegram-Nachricht wird nicht gesendet.")
         print(message)
         return
-        
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    chunks, current = [], ""
-    
-    for line in message.split("\n"):
-        if len(current) + len(line) + 1 > CONFIG["TELEGRAM_MAX_LEN"]:
-            chunks.append(current)
-            current = line
-        else:
-            current = f"{current}\n{line}" if current else line
-    if current:
-        chunks.append(current)
-        
-    for chunk in chunks:
-        try:
-            # 1. Versuch: Mit HTML-Formatierung
-            response = requests.post(
-                url, 
-                json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "parse_mode": "HTML"}, 
-                timeout=CONFIG["REQUEST_TIMEOUT"]
-            )
-            
-            if response.status_code == 200:
-                print("✅ Telegram-Nachricht erfolgreich zugestellt!")
-            else:
-                print(f"⚠️ Telegram HTML-Versand fehlgeschlagen (Status {response.status_code}): {response.text}")
-                
-                # 2. Versuch: Fallback ohne HTML
-                plain = re.sub(r"<[^>]+>", "", chunk)
-                fallback_resp = requests.post(
-                    url, 
-                    json={"chat_id": TELEGRAM_CHAT_ID, "text": plain}, 
-                    timeout=CONFIG["REQUEST_TIMEOUT"]
-                )
-                
-                if fallback_resp.status_code == 200:
-                    print("✅ Telegram-Nachricht im Plaintext-Fallback zugestellt!")
-                else:
-                    print(f"❌ Telegram Plaintext-Versand ebenfalls fehlgeschlagen (Status {fallback_resp.status_code}): {fallback_resp.text}")
 
-        except Exception as exc:
-            print(f"❌ Netzwerkfehler beim Telegram-Versand: {exc}")
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        raise ValueError("Telegram_TOKEN oder TELEGRAM_CHAT_ID fehlt.")
+
+    chunks = split_telegram_message(message, CONFIG["TELEGRAM_MAX_LEN"])
+    print(f"DEBUG Telegram: Sende {len(chunks)} Nachrichtenteil(e), maximal {CONFIG['TELEGRAM_MAX_LEN']} Zeichen je Teil.")
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    for index, chunk in enumerate(chunks, start=1):
+        try:
+            response = requests.post(
+                url,
+                json={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": chunk,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
+                timeout=CONFIG["REQUEST_TIMEOUT"],
+            )
+            print(f"DEBUG Telegram HTML Teil {index}/{len(chunks)} ({len(chunk)} Zeichen): HTTP {response.status_code} | {response.text}")
+
+            if response.ok:
+                time.sleep(0.25)
+                continue
+
+            plain = re.sub(r"<[^>]+>", "", chunk)
+            fallback = requests.post(
+                url,
+                json={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": plain,
+                    "disable_web_page_preview": True,
+                },
+                timeout=CONFIG["REQUEST_TIMEOUT"],
+            )
+            print(f"DEBUG Telegram Plaintext Teil {index}/{len(chunks)} ({len(plain)} Zeichen): HTTP {fallback.status_code} | {fallback.text}")
+            fallback.raise_for_status()
+            time.sleep(0.25)
+        except requests.RequestException as exc:
+            print(f"Fehler beim Telegram-Versand, Teil {index}: {exc}")
+            raise
+
+
 def main():
     missing = [key for key, value in REQUIRED_SECRETS.items() if not value]
     if missing:
         raise ValueError(f"Fehlende Secrets: {', '.join(missing)}")
 
-    login = session.post("https://api.kickbase.com/v4/user/login", json={"em": KB_EMAIL, "pass": KB_PASSWORD, "loy": False, "rep": {}}, timeout=CONFIG["REQUEST_TIMEOUT"])
+    login = session.post(
+        "https://api.kickbase.com/v4/user/login",
+        json={"em": KB_EMAIL, "pass": KB_PASSWORD, "loy": False, "rep": {}},
+        timeout=CONFIG["REQUEST_TIMEOUT"],
+    )
     login.raise_for_status()
     login_data = login.json()
     token = login_data.get("tkn")
@@ -666,7 +636,8 @@ def main():
         raise ValueError("Kickbase-Login fehlgeschlagen: kein Token.")
     session.headers["Authorization"] = f"Bearer {token}"
 
-    league_id = login_data.get("srvl", [])[0].get("id")
+    leagues = login_data.get("srvl", [])
+    league_id = leagues[0].get("id") if leagues else None
     user = login_data.get("u", {}) or {}
     manager_id = user.get("mid") or user.get("id") or user.get("i")
     if not league_id or not manager_id:
@@ -704,10 +675,19 @@ def main():
         detail_response = kb_get(f"https://api.kickbase.com/v4/leagues/{league_id}/players/{player_id}") if player_id else None
         detail = detail_response.json() if detail_response else {}
         team_key = get_team_key(team_names.get(str(player.get("tid"))))
+
         lineup = None
         if team_key in TEAM_LINEUP_SLUGS:
-            lineup = lineup_cache.setdefault(team_key, get_predicted_lineup(TEAM_LINEUP_SLUGS[team_key]))
-        fixture = fixture_cache.setdefault(team_key, fixture_difficulty(fixtures, team_key)) if team_key else None
+            if team_key not in lineup_cache:
+                lineup_cache[team_key] = get_predicted_lineup(TEAM_LINEUP_SLUGS[team_key])
+            lineup = lineup_cache[team_key]
+
+        fixture = None
+        if team_key:
+            if team_key not in fixture_cache:
+                fixture_cache[team_key] = fixture_difficulty(fixtures, team_key)
+            fixture = fixture_cache[team_key]
+
         previous = history["players"].get(player_id, {"mv_history": [], "known_headlines": []})
         result = evaluate_player(
             player, detail, news, blocked, team_counts, cycles, budget, lineup, fixture,
@@ -715,15 +695,16 @@ def main():
             compute_mv_acceleration(previous.get("mv_history", []), player.get("mv", 0)),
             extract_form_points(detail),
         )
-        mv_history = (previous.get("mv_history", []) + [{"date": datetime.now(timezone.utc).isoformat(), "mv": player.get("mv", 0)}])[-CONFIG["MV_HISTORY_MAX_ENTRIES"]:]
-        known = list(dict.fromkeys(previous.get("known_headlines", []) + result["all_negative_headlines"]))[-20:]
+
         if player_id:
+            mv_history = (previous.get("mv_history", []) + [{"date": datetime.now(timezone.utc).isoformat(), "mv": player.get("mv", 0)}])[-CONFIG["MV_HISTORY_MAX_ENTRIES"]:]
+            known = list(dict.fromkeys(previous.get("known_headlines", []) + result["all_negative_headlines"]))[-20:]
             history["players"][player_id] = {"mv_history": mv_history, "known_headlines": known}
 
         name, mv = player.get("n", "Unbekannt"), player.get("mv", 0)
         trend = "📈" if player.get("mvt") == 1 else "📉" if player.get("mvt") == 2 else "➖"
         exs = player.get("exs", 0)
-        time_str = f"{exs//3600}h {(exs%3600)//60}m" if exs > 0 else "Abgelaufen"
+        time_str = f"{exs // 3600}h {(exs % 3600) // 60}m" if exs > 0 else "Abgelaufen"
         message += f"• <b>{esc(name)}</b> {trend} | 💰 {mv:,} EUR | ⏳ {time_str}\n".replace(",", ".")
         message += f"  ✅ <b>Einschaetzung:</b> {esc(result['label'])} (Max. Gebot: {result['max_bid']:,} EUR)\n".replace(",", ".")
         message += f"  📊 <b>Punkte:</b> {result['total_points']} (Durchschnitt {result['avg_points']})\n"
@@ -732,7 +713,16 @@ def main():
         for headline in result["matched_news"]:
             message += f"  📰 <b>News:</b> {esc(headline)}\n"
         message += "\n"
-        scored.append({"name": name, "marktwert": mv, "punkte": result["avg_points"], "startelf": result["predicted_starter"], "restprogramm": result["fixture_difficulty"], "einschaetzung": result["label"], "risiken": result["reason"], "urgency": result["urgency"]})
+        scored.append({
+            "name": name,
+            "marktwert": mv,
+            "punkte": result["avg_points"],
+            "startelf": result["predicted_starter"],
+            "restprogramm": result["fixture_difficulty"],
+            "einschaetzung": result["label"],
+            "risiken": result["reason"],
+            "urgency": result["urgency"],
+        })
 
     message += "🤖 <b>KI-Manager-Einschaetzung:</b>\n" + esc(get_llm_analysis(scored, cycles))
     send_telegram_messages(message)
