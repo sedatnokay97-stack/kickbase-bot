@@ -121,11 +121,11 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     mv = p.get("mv", 0)
     trend_flag = p.get("mvt")
     tid = p.get("tid")
-    player_id = p.get("id")
 
     is_injured = False
     if p_detail:
-        if p_detail.get("status") == 2 or p_detail.get("st") == 2:
+        st = str(p_detail.get("status", p_detail.get("st", "")))
+        if st in ["1", "2"]:
             is_injured = True
 
     matched_news = match_news_for_player(lastname, news_headlines)
@@ -239,7 +239,7 @@ Einleitung, auf Deutsch, im Telegram-Markdown-Stil mit Bulletpoints.
 
 
 def get_llm_analysis(scored_players, cycles_info):
-    """Ruft Gemini 2.5 Flash-Lite auf und gibt den generierten Text zurück."""
+    """Ruft Gemini 1.5 Flash auf und gibt den generierten Text zurück."""
     if not GEMINI_API_KEY:
         return None
 
@@ -331,7 +331,8 @@ def main():
             if eval_result["reason"]:
                 msg += f"  ℹ️ *Begründung:* {eval_result['reason']}\n"
 
-            if p_detail.get("status") == 2 or p_detail.get("st") == 2:
+            st = str(p_detail.get("status", p_detail.get("st", "")))
+            if st in ["1", "2"]:
                 msg += "  🩹 *Status: Verletzt/Gesperrt*\n"
 
             if p.get("tid") in blocked_teams:
