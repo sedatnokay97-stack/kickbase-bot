@@ -85,13 +85,20 @@ TEAM_LINEUP_SLUGS = {
 BUNDESLIGA_TEAM_KEYS = list(TEAM_LINEUP_SLUGS.keys())
 
 # Manuell verifizierte Zuordnung Kickbase-interne tid -> Team-Key.
-# Wird schrittweise erweitert, sobald weitere tids per Debug-Log bestaetigt sind.
-# HINWEIS: tid=14 war zuvor faelschlich "schalke" (unbestaetigte Vermutung), jetzt korrigiert
-# auf Basis von Baumann (tid=14, bestaetigt TSG Hoffenheim).
+# 11 von 18 Vereinen bestaetigt. Offen: bayern, dortmund, schalke, hamburg,
+# augsburg, paderborn, elversberg sowie tid=2 (noch ungeklaert).
 KICKBASE_TID_TO_TEAM = {
+    4: "frankfurt",
+    5: "freiburg",
     7: "leverkusen",
+    9: "stuttgart",
+    10: "werder",
     14: "hoffenheim",
     15: "gladbach",
+    18: "mainz",
+    28: "koeln",
+    40: "union berlin",
+    43: "leipzig",
 }
 
 TEAM_STRENGTH_LAST_SEASON = {
