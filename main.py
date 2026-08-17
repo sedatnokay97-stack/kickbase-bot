@@ -82,10 +82,7 @@ def get_my_team_counts(liga_id, my_user_id, headers):
 
 
 def market_updates_until_first_matchday():
-    """
-    Zählt reale Marktwert-Update-Zyklen (1x täglich, ca. 22:00 MESZ) bis zum 1. Spieltag.
-    Das ist unabhängig von deiner Telegram-Nachrichtenfrequenz.
-    """
+    """Zählt reale Marktwert-Update-Zyklen bis zum 1. Spieltag."""
     now_utc = datetime.utcnow()
     matchday_start = datetime.combine(CONFIG["FIRST_MATCHDAY"], datetime.min.time())
 
@@ -113,10 +110,7 @@ def match_news_for_player(lastname, news_headlines):
 
 
 def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles):
-    """
-    Bewertet einen Marktspieler. WICHTIG: max_bid ist NIE unter dem aktuellen
-    Marktwert (mv), da man bei Kickbase mindestens den Marktwert bieten muss.
-    """
+    """Bewertet einen Marktspieler inkl. Verletzungslogik."""
     lastname = p.get("n", "Unbekannt")
     mv = p.get("mv", 0)
     trend_flag = p.get("mvt")
@@ -124,6 +118,7 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
 
     is_injured = False
     if p_detail:
+        # Checkt Status auf "1" (Verletzt) oder "2" (Gesperrt)
         st = str(p_detail.get("status", p_detail.get("st", "")))
         if st in ["1", "2"]:
             is_injured = True
@@ -239,9 +234,9 @@ Einleitung, auf Deutsch, im Telegram-Markdown-Stil mit Bulletpoints.
 
 
 def get_llm_analysis(scored_players, cycles_info):
-    """Ruft Gemini 1.5 Flash auf und gibt den generierten Text zurück."""
+    """Ruft Gemini auf und fängt Fehler sauber ab, damit der Bot nicht abstürzt."""
     if not GEMINI_API_KEY:
-        return None
+        return "❌ FEHLER: Kein API-Key gefunden! Bitte GitHub Secrets und run.yml prüfen."
 
     prompt = build_llm_prompt(scored_players, cycles_info)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
@@ -254,10 +249,16 @@ def get_llm_analysis(scored_players, cycles_info):
             timeout=20
         )
         data = res.json()
+        
+        # Schauen, ob Google gemeckert hat und den exakten Fehler ausgeben
+        if "error" in data:
+            return f"❌ Google API Fehler: {data['error'].get('message', 'Unbekannter Fehler')}"
+            
         return data["candidates"][0]["content"]["parts"][0]["text"]
+        
     except Exception as e:
         print(f"LLM-Fehler: {e}")
-        return None
+        return f"❌ Fehler beim Verarbeiten der KI-Daten: {e}"
 
 
 def main():
@@ -353,6 +354,7 @@ def main():
                 "news": eval_result["matched_news"]
             })
 
+        # KI-Aufruf mit Error-Handling
         llm_text = get_llm_analysis(scored_players, mw_cycles)
         if llm_text:
             msg += "\n🤖 *KI-Manager-Einschätzung:*\n" + llm_text
