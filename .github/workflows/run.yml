@@ -3,17 +3,17 @@ name: Kickbase Bot Execution
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */8 * * *'  # Laufen alle 8 Stunden
+    - cron: '0 */8 * * *'  # Alle 8 Stunden ausführen
 
 jobs:
   run-bot:
-    runs-runs-on: ubuntu-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/python@v5
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
