@@ -539,7 +539,7 @@ def evaluate_player(player, detail, headlines, blocked_teams, my_team_counts, cy
     score += 3 if avg_points >= 100 else 2 if avg_points >= 60 else 1 if avg_points >= 30 else -1 if 0 < avg_points < 15 else 0
     score += 1 if starter is True else -1 if starter is False else 0
     score += 1 if fixture and fixture["label"] == "leicht" else -1 if fixture and fixture["label"] == "schwer" else 0
-    score += 1 if acceleration == "beschleunigt" else -1 if acceleration == "verstaerkt fallend" else 0
+    score += 1 if mv_acceleration == "beschleunigt" else -1 if mv_acceleration == "verstaerkt fallend" else 0
     score += 1 if form_points is not None and avg_points > 0 and form_points > avg_points * 1.1 else -1 if form_points is not None and avg_points > 0 and form_points < avg_points * 0.7 else 0
     score -= 3 if injured else 0
     score -= 2 if fresh_negative else 1 if aged_negative else 0
