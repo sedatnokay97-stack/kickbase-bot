@@ -206,31 +206,35 @@ def evaluate_player(player, history, starters, injured_list):
     }
 
 # ==========================================
-# KNOTEN 4: GEMINI LLM ANALYSIS (DIRECT REST)
+# KNOTEN 4: GEMINI LLM ANALYSIS (REST + FALLBACKS)
 # ==========================================
 def call_gemini(prompt):
     if not GEMINI_API_KEY:
         return "KI-Analyse übersprungen: Kein Gemini API-Key."
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.3,
-                "maxOutputTokens": 300
+    
+    # Testet dynamisch verfügbare Modelle
+    candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"]
+    
+    for model in candidate_models:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.3,
+                    "maxOutputTokens": 300
+                }
             }
-        }
-        resp = requests.post(url, json=payload, timeout=15)
-        
-        if not resp.ok:
-            print(f"⚠️ Gemini HTTP Error: {resp.status_code} - {resp.text}")
-            return "KI-Analyse konnte aufgrund eines API-Fehlers nicht geladen werden."
-            
-        data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception as exc:
-        print(f"⚠️ Gemini API-Hinweis: {exc}")
-        return "KI-Analyse derzeit nicht verfügbar."
+            resp = requests.post(url, json=payload, timeout=CONFIG["REQUEST_TIMEOUT"])
+            if resp.ok:
+                data = resp.json()
+                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            else:
+                print(f"⚠️ Gemini REST Hinweis ({model}): {resp.status_code} - {resp.text[:150]}")
+        except Exception as exc:
+            print(f"⚠️ Gemini REST Exception ({model}): {exc}")
+
+    return "KI-Analyse derzeit nicht verfügbar."
 
 # ==========================================
 # KNOTEN 5: TELEGRAM DISPATCHER & SPLITTER
