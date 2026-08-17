@@ -58,20 +58,33 @@ def kickbase_login():
     return token, str(league_id)
 
 def get_market_players(token, league_id):
-    """ Holt alle aktuellen Transfermarkt-Spieler im alten Web-Format. """
+    """ Holt alle Transfermarkt-Spieler und umgeht die neuen Kickbase-Namen. """
     url = f"https://api.kickbase.com/v4/leagues/{league_id}/market"
     headers = {
         "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-        "Origin": "https://play.kickbase.com",
-        "Referer": "https://play.kickbase.com/",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Kickbase/8.10.0 (Android)",
+        "Accept": "application/json"
     }
     
     resp = requests.get(url, headers=headers, timeout=CONFIG["REQUEST_TIMEOUT"])
     resp.raise_for_status()
     data = resp.json()
-    return data.get("players", [])
+    
+    # 1. Klassischer Weg
+    if "players" in data and data["players"]:
+        return data["players"]
+        
+    # 2. Smart-Scan: Suche automatisch nach der Liste, die die Spieler enthält
+    for key, value in data.items():
+        if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
+            # Prüfen, ob das Dictionary typische Spieler-Werte enthält
+            if any(k in value[0] for k in ["id", "i", "n", "lastName", "mv"]):
+                print(f"🔍 Kickbase API Update umgangen: Spieler im neuen Ordner '{key}' gefunden!")
+                return value
+                
+    # 3. Fallback: Falls der Markt TATSÄCHLICH komplett leer ist oder Kickbase uns aussperrt
+    print(f"⚠️ DEBUG RAW MARKTDATEN: {json.dumps(data)[:800]}")
+    return []
 
 # ==========================================
 # KNOTEN 2: LIGAINSIDER SCRAPING
@@ -158,9 +171,16 @@ def predict_mv_and_overpay(current_mv, daily_trend):
     return projected_mv, max_bid, int(projected_growth)
 
 def evaluate_player(player, history, starters, injured_list):
-    player_id = player.get("id")
-    name = player.get("n", player.get("lastName", "Unbekannt"))
-    mv = int(player.get("mv", 0))
+    # Smart Fallbacks für Kickbases neue Abkürzungen
+    player_id = player.get("id", player.get("i"))
+    
+    name = player.get("n", player.get("lastName", ""))
+    if not name and "fn" in player and "ln" in player:
+        name = f"{player['fn']} {player['ln']}"
+    if not name:
+        name = "Unbekannt"
+        
+    mv = int(player.get("mv", player.get("m", 0)))
     
     daily_trend = calculate_real_daily_trend(player_id, mv, history)
     proj_mv, max_bid, raw_profit = predict_mv_and_overpay(mv, daily_trend)
