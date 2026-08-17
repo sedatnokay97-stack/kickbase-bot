@@ -40,6 +40,9 @@ CONFIG = {
     "GEMINI_RETRY_DELAY": 5,
     "DEBUG_PLAYER_DETAIL": True,
     "STARTELF_HEURISTIC_ENABLED": True,
+    "FIXTURE_DIFFICULTY_ENABLED": True,
+    "FIXTURE_LOOKAHEAD": 3,
+    "SEASON_YEAR": 2026,
     "OVERPAY_TIERS": [
         (110, 0.30),
         (60, 0.15),
@@ -77,6 +80,33 @@ TEAM_LINEUP_SLUGS = {
     "leipzig": "rb-leipzig/1311",
     "elversberg": "sv-07-elversberg/1331",
 }
+
+BUNDESLIGA_TEAM_KEYS = list(TEAM_LINEUP_SLUGS.keys())
+
+# Staerke-Proxy: Punkte der Abschlusstabelle 2025/26. Aufsteiger (Schalke, Elversberg, Paderborn)
+# erhalten einen konservativen Baseline-Wert, da sie in der 1. Bundesliga noch keine Referenz haben.
+TEAM_STRENGTH_LAST_SEASON = {
+    "bayern": 89,
+    "dortmund": 73,
+    "leipzig": 65,
+    "stuttgart": 62,
+    "hoffenheim": 61,
+    "leverkusen": 59,
+    "freiburg": 47,
+    "frankfurt": 44,
+    "augsburg": 43,
+    "mainz": 40,
+    "union berlin": 39,
+    "gladbach": 38,
+    "hamburg": 38,
+    "k\u00f6ln": 32,
+    "koeln": 32,
+    "werder": 32,
+    "paderborn": 22,
+    "schalke": 20,
+    "elversberg": 20,
+}
+TEAM_STRENGTH_DEFAULT = 45
 
 LINEUP_SKIP_PHRASES = {
     "auf dieser seite", "wir aktualisieren", "voraussichtliche aufstellung",
@@ -256,14 +286,20 @@ def get_team_names(liga_id):
         return {}
 
 
-def find_ligainsider_slug(team_name):
+def get_team_key(team_name):
+    """Matched einen beliebigen Vereinsnamen (Kickbase, LigaInsider, OpenLigaDB) auf einen der 18 festen Team-Keys."""
     if not team_name:
         return None
     name_lower = team_name.lower()
-    for key, slug in TEAM_LINEUP_SLUGS.items():
+    for key in BUNDESLIGA_TEAM_KEYS:
         if key in name_lower:
-            return slug
+            return key
     return None
+
+
+def find_ligainsider_slug(team_name):
+    key = get_team_key(team_name)
+    return TEAM_LINEUP_SLUGS.get(key) if key else None
 
 
 def get_predicted_lineup(slug_id):
@@ -295,6 +331,59 @@ def get_predicted_lineup(slug_id):
     except Exception as e:
         print(f"Warnung: Lineup-Vorschau fuer {slug_id} nicht ladbar: {e}")
     return names
+
+
+def get_season_fixtures():
+    """Laedt den kompletten Saison-Spielplan (alle Spieltage) ueber die freie OpenLigaDB-API."""
+    url = f"https://api.openligadb.de/getmatchdata/bl1/{CONFIG['SEASON_YEAR']}"
+    try:
+        res = requests.get(url, timeout=CONFIG["REQUEST_TIMEOUT"])
+        res.raise_for_status()
+        data = res.json()
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"Warnung: OpenLigaDB-Spielplan konnte nicht geladen werden: {e}")
+        return []
+
+
+def get_team_strength(team_key):
+    return TEAM_STRENGTH_LAST_SEASON.get(team_key, TEAM_STRENGTH_DEFAULT)
+
+
+def get_upcoming_opponents(fixtures, team_key, count):
+    upcoming = []
+    for m in fixtures:
+        if m.get("matchIsFinished"):
+            continue
+        t1 = (m.get("team1") or {}).get("teamName", "")
+        t2 = (m.get("team2") or {}).get("teamName", "")
+        k1 = get_team_key(t1)
+        k2 = get_team_key(t2)
+        if k1 == team_key and k2:
+            upcoming.append((m.get("matchDateTimeUTC", ""), k2, t2))
+        elif k2 == team_key and k1:
+            upcoming.append((m.get("matchDateTimeUTC", ""), k1, t1))
+    upcoming.sort(key=lambda x: x[0])
+    return upcoming[:count]
+
+
+def fixture_difficulty(fixtures, team_key):
+    """Bewertet das Restprogramm eines Vereins anhand der Staerke (Vorsaison-Punkte) der naechsten Gegner."""
+    if not team_key or not fixtures:
+        return None
+    opponents = get_upcoming_opponents(fixtures, team_key, CONFIG["FIXTURE_LOOKAHEAD"])
+    if not opponents:
+        return None
+    strengths = [get_team_strength(k) for _, k, _ in opponents]
+    avg_strength = sum(strengths) / len(strengths)
+    opponent_names = [name.split()[-1] for _, _, name in opponents if name]
+    if avg_strength <= 35:
+        label = "leicht"
+    elif avg_strength <= 55:
+        label = "mittel"
+    else:
+        label = "schwer"
+    return {"label": label, "opponents": opponent_names, "avg_strength": round(avg_strength, 1)}
 
 
 def market_updates_until_first_matchday():
@@ -359,7 +448,7 @@ def get_overpay_pct(avg_points):
     return CONFIG["OVERPAY_TIERS"][-1][1]
 
 
-def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles, my_budget, lineup_names=None):
+def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles, my_budget, lineup_names=None, fixture_info=None):
     lastname = p.get("n", "Unbekannt")
     mv = p.get("mv", 0)
     trend_flag = p.get("mvt")
@@ -421,6 +510,12 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     elif predicted_starter is False:
         score -= 1
 
+    if fixture_info:
+        if fixture_info["label"] == "leicht":
+            score += 1
+        elif fixture_info["label"] == "schwer":
+            score -= 1
+
     if is_injured:
         score -= 3
     if has_negative_news:
@@ -463,6 +558,9 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
         reasons.append("voraussichtlich in Startelf (LigaInsider, Heuristik)")
     elif predicted_starter is False:
         reasons.append("laut LigaInsider evtl. nicht in Startelf (Heuristik)")
+    if fixture_info:
+        opp_str = ", ".join(fixture_info["opponents"]) if fixture_info["opponents"] else "?"
+        reasons.append(f"Restprogramm {fixture_info['label']} (naechste Gegner: {opp_str})")
     if is_injured:
         reasons.append("Verletzungs-/Sperrrisiko (Kickbase)")
     if has_negative_news:
@@ -486,6 +584,7 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
         "avg_points": avg_points,
         "budget_exceeded": budget_exceeded,
         "predicted_starter": predicted_starter,
+        "fixture_difficulty": fixture_info["label"] if fixture_info else None,
     }
 
 
@@ -496,11 +595,11 @@ def get_llm_analysis(scored_players, cycles_info):
     prompt = f"""Du bist ein Kickbase-Experte. Ziel: Herbstmeister werden.
 Noch {cycles_info} Marktwert-Updates. Max 2 Spieler per Verein, nie unter Marktwert bieten.
 
-Hier sind die aktuellen Marktspieler mit Analyse-Daten (inkl. Gesamtpunkte, Ø-Punkte und Startelf-Tipp):
+Hier sind die aktuellen Marktspieler mit Analyse-Daten (inkl. Gesamtpunkte, Ø-Punkte, Startelf-Tipp und Restprogramm):
 {players_json}
 
 Gib fuer die 3-5 spannendsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko).
-Beruecksichtige dabei sowohl Marktwert-Potenzial als auch die Punkteform und Startelf-Wahrscheinlichkeit.
+Beruecksichtige dabei sowohl Marktwert-Potenzial als auch Punkteform, Startelf-Wahrscheinlichkeit und Restprogramm-Schwierigkeit.
 Antworte in klarem Fliesstext ohne Markdown-Formatierung (keine Sternchen, keine Unterstriche, keine Rauten)."""
 
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -600,6 +699,9 @@ def main():
     team_names = get_team_names(liga_id) if CONFIG["STARTELF_HEURISTIC_ENABLED"] else {}
     lineup_cache = {}
 
+    season_fixtures = get_season_fixtures() if CONFIG["FIXTURE_DIFFICULTY_ENABLED"] else []
+    fixture_cache = {}
+
     msg = "⚽ <b>Markt-Update: Kickbase Elite</b>\n\n"
 
     winter_warning = winter_reset_warning()
@@ -634,17 +736,25 @@ def main():
             except Exception as e:
                 print(f"Warnung: Detaildaten fuer {nachname} nicht geladen: {e}")
 
+        team_name = team_names.get(p.get("tid"))
+        team_key = get_team_key(team_name)
+
         lineup_names = None
-        if CONFIG["STARTELF_HEURISTIC_ENABLED"]:
-            team_name = team_names.get(p.get("tid"))
-            slug = find_ligainsider_slug(team_name)
+        if CONFIG["STARTELF_HEURISTIC_ENABLED"] and team_key:
+            slug = TEAM_LINEUP_SLUGS.get(team_key)
             if slug:
                 if slug not in lineup_cache:
                     lineup_cache[slug] = get_predicted_lineup(slug)
                 lineup_names = lineup_cache[slug]
 
+        fixture_info = None
+        if CONFIG["FIXTURE_DIFFICULTY_ENABLED"] and team_key:
+            if team_key not in fixture_cache:
+                fixture_cache[team_key] = fixture_difficulty(season_fixtures, team_key)
+            fixture_info = fixture_cache[team_key]
+
         eval_result = evaluate_player(
-            p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles, my_budget, lineup_names
+            p, p_detail, news_headlines, blocked_teams, my_team_counts, mw_cycles, my_budget, lineup_names, fixture_info
         )
         max_bid_str = f"{eval_result['max_bid']:,}".replace(",", ".")
 
@@ -656,6 +766,11 @@ def main():
             msg += "  🏟️ <b>Startelf-Tipp:</b> Wahrscheinlich (LigaInsider)\n"
         elif eval_result["predicted_starter"] is False:
             msg += "  🪑 <b>Startelf-Tipp:</b> Fraglich/Bank (LigaInsider)\n"
+
+        if eval_result["fixture_difficulty"] == "leicht":
+            msg += "  📅 <b>Restprogramm:</b> Leicht (Form-Pick)\n"
+        elif eval_result["fixture_difficulty"] == "schwer":
+            msg += "  📅 <b>Restprogramm:</b> Schwer\n"
 
         if eval_result["reason"]:
             msg += f"  ℹ️ <b>Begründung:</b> {esc(eval_result['reason'])}\n"
@@ -676,6 +791,7 @@ def main():
             "gesamtpunkte": eval_result["total_points"],
             "durchschnittspunkte": eval_result["avg_points"],
             "startelf_tipp": eval_result["predicted_starter"],
+            "restprogramm": eval_result["fixture_difficulty"],
             "einschaetzung": eval_result["label"],
             "risiken": eval_result["reason"],
         })
