@@ -273,6 +273,8 @@ def get_team_names():
         )
         res.raise_for_status()
         data = res.json()
+        if CONFIG["DEBUG_PLAYER_DETAIL"]:
+            print("DEBUG /competitions/teams RAW:", json.dumps(data, ensure_ascii=False)[:2000])
         items = data.get("it", data) if isinstance(data, dict) else data
         if not isinstance(items, list):
             items = []
@@ -342,6 +344,8 @@ def get_season_fixtures():
         res = requests.get(url, timeout=CONFIG["REQUEST_TIMEOUT"])
         res.raise_for_status()
         data = res.json()
+        if CONFIG["DEBUG_PLAYER_DETAIL"] and isinstance(data, list) and data:
+            print("DEBUG OpenLigaDB erstes Match:", json.dumps(data[0], ensure_ascii=False)[:800])
         return data if isinstance(data, list) else []
     except Exception as e:
         print(f"Warnung: OpenLigaDB-Spielplan konnte nicht geladen werden: {e}")
@@ -699,6 +703,8 @@ def main():
     mw_cycles = market_updates_until_first_matchday()
 
     team_names = get_team_names() if CONFIG["STARTELF_HEURISTIC_ENABLED"] or CONFIG["FIXTURE_DIFFICULTY_ENABLED"] else {}
+    if CONFIG["DEBUG_PLAYER_DETAIL"]:
+        print("DEBUG team_names dict:", json.dumps(team_names, ensure_ascii=False))
     lineup_cache = {}
 
     season_fixtures = get_season_fixtures() if CONFIG["FIXTURE_DIFFICULTY_ENABLED"] else []
@@ -716,6 +722,7 @@ def main():
 
     scored_players = []
     debug_done = False
+    debug_team_done = False
 
     for p in players[:CONFIG["PLAYERS_TO_SHOW"]]:
         nachname = p.get("n", "Unbekannt")
@@ -741,18 +748,26 @@ def main():
         team_name = team_names.get(p.get("tid"))
         team_key = get_team_key(team_name)
 
+        if CONFIG["DEBUG_PLAYER_DETAIL"] and not debug_team_done:
+            print(f"DEBUG Team-Matching: tid={p.get('tid')} team_name={team_name!r} team_key={team_key!r}")
+            debug_team_done = True
+
         lineup_names = None
         if CONFIG["STARTELF_HEURISTIC_ENABLED"] and team_key:
             slug = TEAM_LINEUP_SLUGS.get(team_key)
             if slug:
                 if slug not in lineup_cache:
                     lineup_cache[slug] = get_predicted_lineup(slug)
+                    if CONFIG["DEBUG_PLAYER_DETAIL"]:
+                        print(f"DEBUG Lineup fuer {slug}:", lineup_cache[slug])
                 lineup_names = lineup_cache[slug]
 
         fixture_info = None
         if CONFIG["FIXTURE_DIFFICULTY_ENABLED"] and team_key:
             if team_key not in fixture_cache:
                 fixture_cache[team_key] = fixture_difficulty(season_fixtures, team_key)
+                if CONFIG["DEBUG_PLAYER_DETAIL"]:
+                    print(f"DEBUG Fixture-Info fuer {team_key}:", fixture_cache[team_key])
             fixture_info = fixture_cache[team_key]
 
         eval_result = evaluate_player(
