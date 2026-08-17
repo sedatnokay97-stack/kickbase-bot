@@ -5,8 +5,6 @@ import json
 import time
 import requests
 from bs4 import BeautifulSoup
-from google import genai
-from google.genai import types
 
 # ==========================================
 # CONFIG & ENVIRONMENT SECRETS
@@ -77,12 +75,11 @@ def get_market_players(token, league_id):
     # 2. Smart-Scan: Suche automatisch nach der Liste, die die Spieler enthält
     for key, value in data.items():
         if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
-            # Prüfen, ob das Dictionary typische Spieler-Werte enthält
             if any(k in value[0] for k in ["id", "i", "n", "lastName", "mv"]):
                 print(f"🔍 Kickbase API Update umgangen: Spieler im neuen Ordner '{key}' gefunden!")
                 return value
                 
-    # 3. Fallback: Falls der Markt TATSÄCHLICH komplett leer ist oder Kickbase uns aussperrt
+    # 3. Fallback
     print(f"⚠️ DEBUG RAW MARKTDATEN: {json.dumps(data)[:800]}")
     return []
 
@@ -171,7 +168,6 @@ def predict_mv_and_overpay(current_mv, daily_trend):
     return projected_mv, max_bid, int(projected_growth)
 
 def evaluate_player(player, history, starters, injured_list):
-    # Smart Fallbacks für Kickbases neue Abkürzungen
     player_id = player.get("id", player.get("i"))
     
     name = player.get("n", player.get("lastName", ""))
@@ -210,25 +206,31 @@ def evaluate_player(player, history, starters, injured_list):
     }
 
 # ==========================================
-# KNOTEN 4: GEMINI LLM ANALYSIS
+# KNOTEN 4: GEMINI LLM ANALYSIS (DIRECT REST)
 # ==========================================
 def call_gemini(prompt):
     if not GEMINI_API_KEY:
         return "KI-Analyse übersprungen: Kein Gemini API-Key."
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.3,
-                max_output_tokens=300
-            )
-        )
-        return response.text.strip() if response.text else "Keine KI-Antwort erhalten."
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 300
+            }
+        }
+        resp = requests.post(url, json=payload, timeout=15)
+        
+        if not resp.ok:
+            print(f"⚠️ Gemini HTTP Error: {resp.status_code} - {resp.text}")
+            return "KI-Analyse konnte aufgrund eines API-Fehlers nicht geladen werden."
+            
+        data = resp.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     except Exception as exc:
         print(f"⚠️ Gemini API-Hinweis: {exc}")
-        return f"KI-Analyse derzeit nicht verfügbar. Fehler: {exc}"
+        return "KI-Analyse derzeit nicht verfügbar."
 
 # ==========================================
 # KNOTEN 5: TELEGRAM DISPATCHER & SPLITTER
