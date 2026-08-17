@@ -120,18 +120,37 @@ def esc(value):
 
 
 def kb_get(url, **kwargs):
+    """GET mit Retry/Backoff; permanente 4xx-Fehler werden nicht wiederholt."""
     timeout = kwargs.pop("timeout", CONFIG["REQUEST_TIMEOUT"])
+
     for attempt in range(CONFIG["KB_RETRY_ATTEMPTS"]):
         try:
             response = session.get(url, timeout=timeout, **kwargs)
             response.raise_for_status()
             return response
-        except Exception as exc:
-            print(f"Warnung: Request fehlgeschlagen ({attempt + 1}/{CONFIG['KB_RETRY_ATTEMPTS']}) {url}: {exc}")
-            if attempt < CONFIG["KB_RETRY_ATTEMPTS"] - 1:
-                time.sleep(2 ** attempt)
-    return None
 
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+
+            if status_code is not None and 400 <= status_code < 500 and status_code != 429:
+                print(f"Info: Request nicht verfügbar ({status_code}) {url}; kein Retry.")
+                return None
+
+            print(
+                f"Warnung: Request fehlgeschlagen "
+                f"({attempt + 1}/{CONFIG['KB_RETRY_ATTEMPTS']}) {url}: {exc}"
+            )
+
+        except requests.RequestException as exc:
+            print(
+                f"Warnung: Request fehlgeschlagen "
+                f"({attempt + 1}/{CONFIG['KB_RETRY_ATTEMPTS']}) {url}: {exc}"
+            )
+
+        if attempt < CONFIG["KB_RETRY_ATTEMPTS"] - 1:
+            time.sleep(2 ** attempt)
+
+    return None
 
 def load_history():
     if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
@@ -247,18 +266,37 @@ def get_my_budget(liga_id):
 
 
 def get_team_names():
-    names = {}
-    response = kb_get(f"https://api.kickbase.com/v4/competitions/{CONFIG['COMPETITION_ID']}/teams")
-    if response:
+    """
+    Verwendet immer die statische, bekannte tid-Zuordnung.
+    Der undokumentierte Teams-Endpunkt dient nur als optionales Enrichment.
+    """
+    names = dict(KICKBASE_TID_TO_TEAM)
+
+    url = f"https://api.kickbase.com/v4/competitions/{CONFIG['COMPETITION_ID']}/teams"
+    response = kb_get(url)
+
+    if not response:
+        print("Info: Team-Endpunkt nicht verfügbar; nutze statische Team-Zuordnung.")
+        return names
+
+    try:
         data = response.json()
         items = data.get("it", data) if isinstance(data, dict) else data
+
         if isinstance(items, list):
             for item in items:
                 tid = item.get("id") or item.get("tid")
                 name = item.get("name") or item.get("nm") or item.get("n")
+
                 if tid and name:
                     names[str(tid)] = name
-    names.update(KICKBASE_TID_TO_TEAM)
+
+    except (ValueError, TypeError) as exc:
+        print(
+            "Info: Team-Endpunkt konnte nicht ausgewertet werden; "
+            f"nutze statische Zuordnung: {exc}"
+        )
+
     return names
 
 
@@ -368,17 +406,59 @@ def call_gemini(prompt, max_tokens, temperature):
 
 
 def filter_news_with_gemini(headlines, names):
+    """
+    Best-effort-News-Zuordnung via Gemini.
+    Bei ungültigem Modell-JSON wird automatisch der Regex-Fallback verwendet.
+    """
     if not GEMINI_API_KEY or not headlines or not names:
         return {}
-    prompt = f'''Ordne die relevanten Fussball-Schlagzeilen eindeutig den folgenden Kickbase-Spieler-Nachnamen zu und bewerte sie als positiv, negativ oder neutral. Antworte nur als JSON: {{"Nachname": [{{"headline": "...", "sentiment": "negativ"}}]}}.
+
+    prompt = f'''Ordne nur eindeutig passende Fussball-Schlagzeilen den folgenden
+Kickbase-Spieler-Nachnamen zu und bewerte jeden Treffer als positiv, negativ oder neutral.
+
+Antworte ausschließlich mit valide parsebarem JSON:
+{{"Nachname": [{{"headline": "...", "sentiment": "negativ"}}]}}
+
+Wichtig:
+- Kein Markdown.
+- Kein erklärender Text vor oder nach dem JSON.
+- Keine Zeilenumbrüche innerhalb eines JSON-Strings.
+- Spieler ohne Treffer weglassen.
+
 Spieler: {", ".join(names)}
-Schlagzeilen: {json.dumps(headlines, ensure_ascii=False)}'''
+
+Schlagzeilen:
+{json.dumps(headlines, ensure_ascii=False)}'''
+
     try:
-        text = re.sub(r"^```(?:json)?|```$", "", call_gemini(prompt, 1000, 0.1), flags=re.MULTILINE).strip()
-        result = json.loads(text)
+        raw = call_gemini(prompt, 1000, 0.1).strip()
+        raw = re.sub(
+            r"^```(?:json)?\s*|\s*```$",
+            "",
+            raw,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError:
+            start = raw.find("{")
+            end = raw.rfind("}")
+
+            if start < 0 or end <= start:
+                print("Info: Gemini-News-Filter liefert kein JSON; Regex-Fallback aktiv.")
+                return {}
+
+            result = json.loads(raw[start:end + 1])
+
         return result if isinstance(result, dict) else {}
+
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        print(f"Info: Gemini-News-Filter liefert kein verwertbares JSON; Regex-Fallback aktiv: {exc}")
+        return {}
+
     except Exception as exc:
-        print(f"Warnung: Gemini-News-Filter fehlgeschlagen: {exc}")
+        print(f"Info: Gemini-News-Filter nicht verfügbar; Regex-Fallback aktiv: {exc}")
         return {}
 
 
@@ -621,3 +701,4 @@ if __name__ == "__main__":
         print(f"Fehler: {exc}")
         traceback.print_exc()
         sys.exit(1)
+Hotfix: kb_get kein Retry bei 404, get_team_names robust, filter_news_with_gemini JSON-Recovery
