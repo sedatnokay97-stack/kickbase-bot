@@ -84,6 +84,12 @@ TEAM_LINEUP_SLUGS = {
 
 BUNDESLIGA_TEAM_KEYS = list(TEAM_LINEUP_SLUGS.keys())
 
+# Manuell verifizierte Zuordnung Kickbase-interne tid -> Team-Key.
+# Wird schrittweise erweitert, sobald weitere tids per Debug-Log bestaetigt sind.
+KICKBASE_TID_TO_TEAM = {
+    14: "schalke",
+}
+
 TEAM_STRENGTH_LAST_SEASON = {
     "bayern": 89,
     "dortmund": 73,
@@ -265,7 +271,13 @@ def get_my_budget(liga_id):
 
 
 def get_team_names():
-    """Liest tid -> Vereinsname ueber den Competition-Endpoint (/v4/competitions/{id}/teams)."""
+    """
+    Liefert tid -> Team-Key. Da Kickbase v4 keinen dokumentierten Team-Namen-Endpoint
+    hat, nutzen wir primaer eine manuell verifizierte statische Zuordnung
+    (KICKBASE_TID_TO_TEAM) und versuchen zusaetzlich einen (evtl. nicht funktionierenden)
+    API-Call als Fallback/Erweiterung.
+    """
+    names = {}
     try:
         res = session.get(
             f"https://api.kickbase.com/v4/competitions/{CONFIG['COMPETITION_ID']}/teams",
@@ -273,25 +285,25 @@ def get_team_names():
         )
         res.raise_for_status()
         data = res.json()
-        if CONFIG["DEBUG_PLAYER_DETAIL"]:
-            print("DEBUG /competitions/teams RAW:", json.dumps(data, ensure_ascii=False)[:2000])
         items = data.get("it", data) if isinstance(data, dict) else data
-        if not isinstance(items, list):
-            items = []
-        names = {}
-        for item in items:
-            tid = item.get("id") or item.get("tid")
-            name = item.get("name") or item.get("nm") or item.get("n")
-            if tid and name:
-                names[tid] = name
-        return names
+        if isinstance(items, list):
+            for item in items:
+                tid = item.get("id") or item.get("tid")
+                name = item.get("name") or item.get("nm") or item.get("n")
+                if tid and name:
+                    names[tid] = name
     except Exception as e:
-        print(f"Warnung: Team-Namen konnten nicht geladen werden: {e}")
-        return {}
+        print(f"Warnung: Team-Namen ueber API nicht ladbar (nutze statische Zuordnung): {e}")
+
+    # Statische, manuell verifizierte Zuordnung ueberschreibt/ergaenzt die API-Antwort
+    for tid, team_key in KICKBASE_TID_TO_TEAM.items():
+        names[tid] = team_key
+
+    return names
 
 
 def get_team_key(team_name):
-    """Matched einen beliebigen Vereinsnamen (Kickbase, LigaInsider, OpenLigaDB) auf einen der 18 festen Team-Keys."""
+    """Matched einen beliebigen Vereinsnamen ODER bereits einen Team-Key auf einen der 18 festen Team-Keys."""
     if not team_name:
         return None
     name_lower = team_name.lower()
@@ -344,8 +356,6 @@ def get_season_fixtures():
         res = requests.get(url, timeout=CONFIG["REQUEST_TIMEOUT"])
         res.raise_for_status()
         data = res.json()
-        if CONFIG["DEBUG_PLAYER_DETAIL"] and isinstance(data, list) and data:
-            print("DEBUG OpenLigaDB erstes Match:", json.dumps(data[0], ensure_ascii=False)[:800])
         return data if isinstance(data, list) else []
     except Exception as e:
         print(f"Warnung: OpenLigaDB-Spielplan konnte nicht geladen werden: {e}")
@@ -703,12 +713,14 @@ def main():
     mw_cycles = market_updates_until_first_matchday()
 
     team_names = get_team_names() if CONFIG["STARTELF_HEURISTIC_ENABLED"] or CONFIG["FIXTURE_DIFFICULTY_ENABLED"] else {}
-    if CONFIG["DEBUG_PLAYER_DETAIL"]:
-        print("DEBUG team_names dict:", json.dumps(team_names, ensure_ascii=False))
     lineup_cache = {}
 
     season_fixtures = get_season_fixtures() if CONFIG["FIXTURE_DIFFICULTY_ENABLED"] else []
     fixture_cache = {}
+
+    if CONFIG["DEBUG_PLAYER_DETAIL"]:
+        alle_tids = [{"name": p.get("n"), "tid": p.get("tid")} for p in players[:CONFIG["PLAYERS_TO_SHOW"]]]
+        print("DEBUG Alle Name->tid dieser Marktliste:", json.dumps(alle_tids, ensure_ascii=False))
 
     msg = "⚽ <b>Markt-Update: Kickbase Elite</b>\n\n"
 
@@ -722,7 +734,6 @@ def main():
 
     scored_players = []
     debug_done = False
-    debug_team_done = False
 
     for p in players[:CONFIG["PLAYERS_TO_SHOW"]]:
         nachname = p.get("n", "Unbekannt")
@@ -739,8 +750,6 @@ def main():
                 res.raise_for_status()
                 p_detail = res.json()
                 if CONFIG["DEBUG_PLAYER_DETAIL"] and not debug_done:
-                    print("DEBUG P (Marktdaten):", json.dumps(p, indent=2, ensure_ascii=False))
-                    print("DEBUG P_DETAIL (erster Spieler):", json.dumps(p_detail, indent=2, ensure_ascii=False))
                     debug_done = True
             except Exception as e:
                 print(f"Warnung: Detaildaten fuer {nachname} nicht geladen: {e}")
@@ -748,26 +757,18 @@ def main():
         team_name = team_names.get(p.get("tid"))
         team_key = get_team_key(team_name)
 
-        if CONFIG["DEBUG_PLAYER_DETAIL"] and not debug_team_done:
-            print(f"DEBUG Team-Matching: tid={p.get('tid')} team_name={team_name!r} team_key={team_key!r}")
-            debug_team_done = True
-
         lineup_names = None
         if CONFIG["STARTELF_HEURISTIC_ENABLED"] and team_key:
             slug = TEAM_LINEUP_SLUGS.get(team_key)
             if slug:
                 if slug not in lineup_cache:
                     lineup_cache[slug] = get_predicted_lineup(slug)
-                    if CONFIG["DEBUG_PLAYER_DETAIL"]:
-                        print(f"DEBUG Lineup fuer {slug}:", lineup_cache[slug])
                 lineup_names = lineup_cache[slug]
 
         fixture_info = None
         if CONFIG["FIXTURE_DIFFICULTY_ENABLED"] and team_key:
             if team_key not in fixture_cache:
                 fixture_cache[team_key] = fixture_difficulty(season_fixtures, team_key)
-                if CONFIG["DEBUG_PLAYER_DETAIL"]:
-                    print(f"DEBUG Fixture-Info fuer {team_key}:", fixture_cache[team_key])
             fixture_info = fixture_cache[team_key]
 
         eval_result = evaluate_player(
