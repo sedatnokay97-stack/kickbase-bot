@@ -86,8 +86,12 @@ BUNDESLIGA_TEAM_KEYS = list(TEAM_LINEUP_SLUGS.keys())
 
 # Manuell verifizierte Zuordnung Kickbase-interne tid -> Team-Key.
 # Wird schrittweise erweitert, sobald weitere tids per Debug-Log bestaetigt sind.
+# HINWEIS: tid=14 war zuvor faelschlich "schalke" (unbestaetigte Vermutung), jetzt korrigiert
+# auf Basis von Baumann (tid=14, bestaetigt TSG Hoffenheim).
 KICKBASE_TID_TO_TEAM = {
-    14: "schalke",
+    7: "leverkusen",
+    14: "hoffenheim",
+    15: "gladbach",
 }
 
 TEAM_STRENGTH_LAST_SEASON = {
