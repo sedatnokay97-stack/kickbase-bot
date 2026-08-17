@@ -611,8 +611,10 @@ def send_telegram_messages(message):
         print("DRY_RUN aktiv – Telegram-Nachricht wird nicht gesendet.")
         print(message)
         return
+        
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     chunks, current = [], ""
+    
     for line in message.split("\n"):
         if len(current) + len(line) + 1 > CONFIG["TELEGRAM_MAX_LEN"]:
             chunks.append(current)
@@ -621,16 +623,36 @@ def send_telegram_messages(message):
             current = f"{current}\n{line}" if current else line
     if current:
         chunks.append(current)
+        
     for chunk in chunks:
         try:
-            response = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "parse_mode": "HTML"}, timeout=CONFIG["REQUEST_TIMEOUT"])
-            if response.status_code != 200:
+            # 1. Versuch: Mit HTML-Formatierung
+            response = requests.post(
+                url, 
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "parse_mode": "HTML"}, 
+                timeout=CONFIG["REQUEST_TIMEOUT"]
+            )
+            
+            if response.status_code == 200:
+                print("✅ Telegram-Nachricht erfolgreich zugestellt!")
+            else:
+                print(f"⚠️ Telegram HTML-Versand fehlgeschlagen (Status {response.status_code}): {response.text}")
+                
+                # 2. Versuch: Fallback ohne HTML
                 plain = re.sub(r"<[^>]+>", "", chunk)
-                requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": plain}, timeout=CONFIG["REQUEST_TIMEOUT"])
+                fallback_resp = requests.post(
+                    url, 
+                    json={"chat_id": TELEGRAM_CHAT_ID, "text": plain}, 
+                    timeout=CONFIG["REQUEST_TIMEOUT"]
+                )
+                
+                if fallback_resp.status_code == 200:
+                    print("✅ Telegram-Nachricht im Plaintext-Fallback zugestellt!")
+                else:
+                    print(f"❌ Telegram Plaintext-Versand ebenfalls fehlgeschlagen (Status {fallback_resp.status_code}): {fallback_resp.text}")
+
         except Exception as exc:
-            print(f"Fehler beim Telegram-Versand: {exc}")
-
-
+            print(f"❌ Netzwerkfehler beim Telegram-Versand: {exc}")
 def main():
     missing = [key for key, value in REQUIRED_SECRETS.items() if not value]
     if missing:
