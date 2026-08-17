@@ -554,8 +554,8 @@ def evaluate_player(player, detail, headlines, blocked_teams, my_team_counts, cy
     reasons = []
     if trend == 1: reasons.append("positiver Marktwert-Trend")
     if trend == 2: reasons.append("fallender Marktwert-Trend")
-    if acceleration == "beschleunigt": reasons.append("Marktwert-Anstieg beschleunigt sich")
-    if acceleration == "verstaerkt fallend": reasons.append("Marktwert faellt staerker als zuvor")
+    if mv_acceleration == "beschleunigt": reasons.append("Marktwert-Anstieg beschleunigt sich")
+    if mv_acceleration == "verstaerkt fallend": reasons.append("Marktwert faellt staerker als zuvor")
     if avg_points >= 60: reasons.append(f"starke Punkteform (Durchschnitt {avg_points})")
     if starter is True: reasons.append("voraussichtlich in Startelf")
     if starter is False: reasons.append("Startelf fraglich")
