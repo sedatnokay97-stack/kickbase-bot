@@ -31,15 +31,15 @@ REQUIRED_SECRETS = {
 CONFIG = {
     # Liga-Regeln / Zeitlogik
     "MAX_PER_TEAM": 2,
-    "FIRST_MATCHDAY": date(2026, 8, 28),
-    "MW_UPDATE_HOUR_UTC": 20,
+    "FIRST_MATCHDAY": date(2026, 8, 28),   # Datum 1. Spieltag
+    "MW_UPDATE_HOUR_UTC": 20,              # Marktwert-Update (UTC)
     "PLAYERS_TO_SHOW": 15,
 
     # Technische Einstellungen
     "REQUEST_TIMEOUT": 10,
     "TELEGRAM_MAX_LEN": 3900,
 
-    # KI-Modell (aus deiner Liste)
+    # KI-Modell aus deiner Liste
     "GEMINI_MODEL": "gemini-3.7-flash",
 }
 
@@ -90,18 +90,27 @@ def count_by_team(squad_items):
     return counts
 
 
-def build_blocked_teams(liga_id, ranking_res, my_user_id):
+def build_blocked_teams(liga_id, ranking_res, my_manager_id):
     """
-    Gegner-Radar: Für jeden Gegner prüfen, welche Vereine bereits
+    Gegner-Radar: Für jeden Manager prüfen, welche Vereine bereits
     mit >= MAX_PER_TEAM Spielern besetzt sind.
+    Nutzt den offiziellen Managers-Endpoint /managers/{managerId}/squad.[web:40]
     """
     blocked_teams = {}
     for user in ranking_res.get("users", []):
-        if user.get("id") == my_user_id:
+        # Manager-ID des Gegners aus dem Ranking-Objekt holen
+        opponent_manager_id = user.get("mid") or user.get("id")
+
+        # eigenen Manager überspringen
+        if opponent_manager_id == my_manager_id:
             continue
+
+        if not opponent_manager_id:
+            continue
+
         try:
             res = session.get(
-                f"https://api.kickbase.com/v4/leagues/{liga_id}/users/{user.get('id')}/squad",
+                f"https://api.kickbase.com/v4/leagues/{liga_id}/managers/{opponent_manager_id}/squad",
                 timeout=CONFIG["REQUEST_TIMEOUT"],
             )
             res.raise_for_status()
@@ -117,15 +126,15 @@ def build_blocked_teams(liga_id, ranking_res, my_user_id):
     return blocked_teams
 
 
-def get_my_team_counts(liga_id, my_user_id):
-    """Eigenen Kader laden und Spieleranzahl pro Verein zählen."""
-    if not my_user_id:
-        print("Warnung: my_user_id ist None – eigener Kader kann nicht geladen werden.")
+def get_my_team_counts(liga_id, my_manager_id):
+    """Eigenen Kader über Managers-Endpoint laden und Spieleranzahl pro Verein zählen.[web:40]"""
+    if not my_manager_id:
+        print("Warnung: my_manager_id ist None – eigener Kader kann nicht geladen werden.")
         return {}
 
     try:
         res = session.get(
-            f"https://api.kickbase.com/v4/leagues/{liga_id}/users/{my_user_id}/squad",
+            f"https://api.kickbase.com/v4/leagues/{liga_id}/managers/{my_manager_id}/squad",
             timeout=CONFIG["REQUEST_TIMEOUT"],
         )
         res.raise_for_status()
@@ -279,7 +288,7 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
 def get_llm_analysis(scored_players, cycles_info):
     """
     Ruft Gemini über das google-genai SDK auf und gibt einen Text zurück.
-    Bei Fehlern kommt ein klarer Hinweis statt eines Absturzes.
+    Bei Fehlern kommt ein klarer Hinweis statt eines Absturzes.[web:88]
     """
     if not GEMINI_API_KEY:
         return "FEHLER: Kein GEMINI_API_KEY gefunden!"
@@ -381,13 +390,17 @@ def main():
     if not token:
         raise ValueError("Login fehlgeschlagen! Kein Token erhalten.")
 
-    # League-ID und eigene User-ID robust auslesen.[web:40][web:42]
+    # League-ID und eigene User/Manager-ID robust auslesen.[web:40][web:42]
     liga_id = login_res.get("srvl", [])[0].get("id")
 
     user_obj = login_res.get("u", {}) or {}
     my_user_id = user_obj.get("id") or user_obj.get("i")
     if not my_user_id:
         raise ValueError(f"Keine User-ID im Login-Response gefunden: {user_obj}")
+
+    my_manager_id = user_obj.get("mid") or my_user_id
+    if not my_manager_id:
+        raise ValueError(f"Keine Manager-ID im Login-Response gefunden: {user_obj}")
 
     session.headers["Authorization"] = f"Bearer {token}"
 
@@ -406,8 +419,8 @@ def main():
 
     players = sorted(market_res.get("it", []), key=lambda x: x.get("exs", 999999))
 
-    blocked_teams = build_blocked_teams(liga_id, ranking_res, my_user_id)
-    my_team_counts = get_my_team_counts(liga_id, my_user_id)
+    blocked_teams = build_blocked_teams(liga_id, ranking_res, my_manager_id)
+    my_team_counts = get_my_team_counts(liga_id, my_manager_id)
     mw_cycles = market_updates_until_first_matchday()
 
     msg = "⚽ <b>Markt-Update: Kickbase Elite</b>\n\n"
