@@ -495,7 +495,6 @@ def main():
         print("DEBUG: Anzahl eigener Kaderspieler:", len(my_squad_items))
 
         first_squad_player = my_squad_items[0] if my_squad_items else {}
-        print("DEBUG: Erster Kaderspieler (Rohdaten):", first_squad_player)
 
         debug_player_id = (
             first_squad_player.get("id")
@@ -510,20 +509,19 @@ def main():
 
     if debug_player_id:
         try:
-            r1 = session.get(
-                f"https://api.kickbase.com/v4/leagues/{liga_id}/players/{debug_player_id}/performance",
-                timeout=CONFIG["REQUEST_TIMEOUT"],
-            )
-            print("PERFORMANCE:", r1.status_code, r1.text[:1500])
-        except Exception as e:
-            print("Fehler performance:", e)
-
-        try:
             r2 = session.get(
                 f"https://api.kickbase.com/v4/leagues/{liga_id}/teamcenter/myeleven",
                 timeout=CONFIG["REQUEST_TIMEOUT"],
             )
-            print("MYELEVEN:", r2.status_code, r2.text[:1500])
+            myeleven_data = r2.json()
+            lp_list = myeleven_data.get("lp", [])
+            print("MYELEVEN Status:", r2.status_code, "Anzahl Spieler:", len(lp_list))
+            print("MYELEVEN Top-Level-Keys:", list(myeleven_data.keys()))
+            if lp_list:
+                print(
+                    "MYELEVEN erster Spieler (volle Rohdaten):",
+                    json.dumps(lp_list[0], indent=2, ensure_ascii=False),
+                )
         except Exception as e:
             print("Fehler myeleven:", e)
     else:
