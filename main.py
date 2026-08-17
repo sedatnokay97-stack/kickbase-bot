@@ -152,10 +152,9 @@ Hier sind die aktuellen Marktspieler mit Analyse-Daten:
 {players_json}
 
 Gib für die 3-5 spannendsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko). 
-WICHTIG: Antworte in absolutem Reintext! Verwende KEINE Sternchen (*), keine Unterstriche (_) und keine Rauten (#). Nutze als Aufzählungszeichen nur normale Bindestriche (-). Direkter Einstieg ohne Floskeln."""
+Antworte DIREKT und in klarem Text. Verwende KEINE Markdown-Zeichen."""
 
     try:
-        # Hier ist die Änderung: gemini-2.0-flash statt 1.5-flash!
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
         headers = {'Content-Type': 'application/json'}
         data = {
@@ -238,13 +237,17 @@ def main():
             })
 
         llm_text = get_llm_analysis(scored_players, mw_cycles)
-        msg += "🤖 *KI-Manager-Einschätzung:*\n" + llm_text
+        
+        # NEU: Die "Waschanlage" für den KI-Text! Entfernt alle Sternchen, Unterstriche und Rauten.
+        llm_text_clean = llm_text.replace("*", "").replace("_", "").replace("#", "").replace("`", "")
+        
+        msg += "🤖 *KI-Manager-Einschätzung:*\n" + llm_text_clean
 
         # Senden mit Markdown
         tg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         response = requests.post(tg_url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
         
-        # Fallback: Falls Telegram wegen der Markdown-Formatierung streikt, unformatiert senden
+        # Fallback: Falls Telegram doch noch meckert
         if response.status_code != 200:
             print(f"Markdown-Fehler: {response.text}")
             requests.post(tg_url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
