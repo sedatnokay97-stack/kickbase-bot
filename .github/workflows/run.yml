@@ -3,7 +3,7 @@ name: Kickbase 12h Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */4 * * *'  # Läuft alle 4 Stunden automatisch
+    - cron: '0 */4 * * *'
 
 jobs:
   run-bot:
