@@ -460,10 +460,6 @@ def evaluate_player(player, history, starters, injured_list, my_team_counts=None
     budget_exceeded = my_budget is not None and max_bid > my_budget
 
     recommendation = "ABWARTEN"
-    if raw_profit > 1_500_000 and not is_injured:
-        recommendation = "KAUF JETZT (High Profit)"
-    elif daily_trend > 0:
-        recommendation = "BEOBACHTEN"
     if raw_profit > 800_000 and not is_injured:
     recommendation = "KAUF JETZT (High Profit)"
     elif raw_profit > 150_000:
