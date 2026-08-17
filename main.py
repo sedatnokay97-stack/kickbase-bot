@@ -157,7 +157,7 @@ Gib für die 3-5 spannendsten Spieler eine kurze Empfehlung ab (Kauf oder Risiko
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.0-flash',
             contents=prompt,
         )
         return response.text
