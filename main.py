@@ -183,7 +183,7 @@ def get_my_budget(liga_id):
         data = res.json()
         for key in ["budget", "b", "amount"]:
             if key in data and data[key] is not None:
-                return data[key]
+                return int(data[key])
     except Exception as e:
         print(f"Warnung: /me/budget nicht verfuegbar, versuche Fallback: {e}")
     try:
@@ -192,7 +192,7 @@ def get_my_budget(liga_id):
         data = res.json()
         for key in ["budget", "b", "amount"]:
             if key in data and data[key] is not None:
-                return data[key]
+                return int(data[key])
     except Exception as e:
         print(f"Warnung: Kontostand konnte nicht geladen werden: {e}")
     return None
