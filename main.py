@@ -606,8 +606,8 @@ def main():
     # === NEUER PRIORISIERTER REPORT ===
     evaluated_list.sort(key=lambda x: x["exp_profit"], reverse=True)
 
-    top_chancen = [p for p in evaluated_list if p["recommendation"].startswith("KAUF JETZT")]
-    beobachten = [p for p in evaluated_list if p["recommendation"] == "BEOBACHTEN" and p["exp_profit"] > 300_000]
+   top_chancen = [p for p in evaluated_list if p["exp_profit"] > 800_000 and not p["is_injured"] and not p["violates_my_limit"]]
+    beobachten = [p for p in evaluated_list if p["exp_profit"] > 150_000 and p["exp_profit"] <= 800_000 and not p["is_injured"] and not p["violates_my_limit"]]
     risiken = [p for p in evaluated_list if "BLOCKIERT" in p["recommendation"] or "RISIKO" in p["recommendation"] or p["budget_exceeded"]]
 
     report_lines = [
