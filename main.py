@@ -13,7 +13,6 @@ KB_EMAIL = os.environ.get("KB_EMAIL")
 KB_PASSWORD = os.environ.get("KB_PASSWORD")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 CONFIG = {
     "DRY_RUN": False,
@@ -206,38 +205,7 @@ def evaluate_player(player, history, starters, injured_list):
     }
 
 # ==========================================
-# KNOTEN 4: GEMINI LLM ANALYSIS (REST + FALLBACKS)
-# ==========================================
-def call_gemini(prompt):
-    if not GEMINI_API_KEY:
-        return "KI-Analyse übersprungen: Kein Gemini API-Key."
-    
-    # Testet dynamisch verfügbare Modelle
-    candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"]
-    
-    for model in candidate_models:
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-            payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "temperature": 0.3,
-                    "maxOutputTokens": 300
-                }
-            }
-            resp = requests.post(url, json=payload, timeout=CONFIG["REQUEST_TIMEOUT"])
-            if resp.ok:
-                data = resp.json()
-                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            else:
-                print(f"⚠️ Gemini REST Hinweis ({model}): {resp.status_code} - {resp.text[:150]}")
-        except Exception as exc:
-            print(f"⚠️ Gemini REST Exception ({model}): {exc}")
-
-    return "KI-Analyse derzeit nicht verfügbar."
-
-# ==========================================
-# KNOTEN 5: TELEGRAM DISPATCHER & SPLITTER
+# KNOTEN 4: TELEGRAM DISPATCHER & SPLITTER
 # ==========================================
 def split_telegram_message(message, max_len):
     chunks = []
@@ -342,17 +310,6 @@ def main():
     
     save_history(history)
     
-    top_targets = [p for p in evaluated_list if p["exp_profit"] > 0][:5]
-    if not top_targets:
-        llm_summary = "Aktuell keine profitablen Spieler auf dem Markt."
-    else:
-        prompt = (
-            f"Du bist ein Kickbase-Experte. Gib ein knallhartes Fazit (max 3 deutsche Sätze) "
-            f"zu diesen Markt-Chancen:\n{json.dumps(top_targets)}"
-        )
-        llm_summary = call_gemini(prompt)
-    
-    report_lines.append(f"\n🤖 <b>KI-Manager Fazit:</b>\n{llm_summary}")
     full_report = "\n".join(report_lines)
     
     send_telegram_messages(full_report)
