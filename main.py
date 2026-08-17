@@ -1,4 +1,4 @@
-import os
+Import os
 import sys
 import re
 import json
@@ -40,19 +40,21 @@ CONFIG = {
     "REQUEST_TIMEOUT": 10,
     "TELEGRAM_MAX_LEN": 3900,
 
-    # KI-Modell (funktioniert mit generateContent; ggf. auf ein Modell aus deiner ListModels-Ausgabe ändern)
+    # KI-Modell
     "GEMINI_MODEL": "gemini-3.7-flash",
 }
 
-# News-Quellen
+# News-Quellen (RSS)
 NEWS_FEEDS = [
-    # Kicker Bundesliga-News (offizieller RSS-Feed)
+    # Kicker Bundesliga-News
     "https://newsfeed.kicker.de/news/bundesliga",
-    # Transfermarkt allgemeine News (RSS-Feed)
+    # Transfermarkt allgemeine News
     "https://www.transfermarkt.de/rss/news",
+    # Sportschau (ARD) Bundesliga-News
+    "https://www.sportschau.de/fussball/bundesliga/index~rss2.xml",
 ]
 
-# LigaInsider Verletzten-/Sperren-Liste (HTML)
+# LigaInsider Verletzten-/Sperren-Liste (HTML-Scraping)
 LIGAINSIDER_INJURY_URL = "https://www.ligainsider.de/bundesliga/verletzte-und-gesperrte-spieler/"
 
 # HTTP-Session
@@ -81,14 +83,13 @@ def get_ligainsider_injury_news():
     try:
         res = session.get(LIGAINSIDER_INJURY_URL, timeout=CONFIG["REQUEST_TIMEOUT"])
         res.raise_for_status()
+        res.encoding = "utf-8"
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # Erste Tabelle auf der Seite suchen (Spieler / Grund / Letzte News / Fehlt seit)
         table = soup.find("table")
         if table:
             for row in table.find_all("tr"):
                 cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-                # Erwartet: z.B. [Spieler, Grund, Letzte News, Fehlt seit]
                 if len(cells) >= 3:
                     player = cells[0]
                     last_news = cells[2]
@@ -107,15 +108,17 @@ def get_news():
     Sammelt News-Headlines aus mehreren Quellen:
     - Kicker Bundesliga RSS
     - Transfermarkt RSS
+    - Sportschau RSS
     - LigaInsider HTML-Verletztenseite
     """
     headlines = []
 
-    # 1) RSS-Feeds (Kicker + Transfermarkt)
+    # 1) RSS-Feeds
     for url in NEWS_FEEDS:
         try:
             res = requests.get(url, timeout=CONFIG["REQUEST_TIMEOUT"])
             res.raise_for_status()
+            res.encoding = "utf-8"
             try:
                 root = ET.fromstring(res.text)
             except ET.ParseError:
@@ -166,7 +169,6 @@ def build_blocked_teams(liga_id, ranking_res, my_manager_id):
     """
     Gegner-Radar: Für jeden Manager prüfen, welche Vereine bereits
     mit >= MAX_PER_TEAM Spielern besetzt sind.
-    Nutzt den offiziellen Managers-Endpoint /managers/{managerId}/squad.
     """
     blocked_teams = {}
     for user in ranking_res.get("users", []):
@@ -260,7 +262,6 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     trend_flag = p.get("mvt")
     tid = p.get("tid")
 
-    # Status-Flags aus Markt- und Detaildaten
     st_market = str(p.get("st", "0"))
     st_detail = str(p_detail.get("status", p_detail.get("st", "0")) if p_detail else "0")
     is_injured = st_market in ["1", "2", "4", "8"] or st_detail in ["1", "2", "4", "8"]
@@ -279,10 +280,8 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     violates_my_limit = my_count_for_team >= CONFIG["MAX_PER_TEAM"]
     opponents_blocked = tid in blocked_teams
 
-    # Score berechnen (80/20-Heuristik)
     score = 0
 
-    # Marktwert ~ grobe Qualitätsskala
     if mv < 2_000_000:
         score += 1
     elif mv < 6_000_000:
@@ -292,19 +291,16 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     else:
         score += 4
 
-    # Trend
     if trend_flag == 1:
         score += 2
     elif trend_flag == 2:
         score -= 1
 
-    # Zeit bis Spieltag
     if mw_cycles >= 15:
         score += 2
     elif mw_cycles >= 7:
         score += 1
 
-    # Risiko
     if is_injured:
         score -= 3
     if has_negative_news:
@@ -314,7 +310,6 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
     if opponents_blocked:
         score -= 1
 
-    # Label / max_bid
     if score >= 6 and not violates_my_limit and not is_injured and not has_negative_news:
         label = "TOP-KAUF"
         max_bid = int(mv * 1.15)
@@ -325,10 +320,8 @@ def evaluate_player(p, p_detail, news_headlines, blocked_teams, my_team_counts, 
         label = "RISKANT"
         max_bid = int(mv * 1.00)
 
-    # Nie unter Marktwert bieten
     max_bid = max(max_bid, mv)
 
-    # Begründungstext
     reasons = []
     if trend_flag == 1:
         reasons.append("positiver Marktwert-Trend")
@@ -362,7 +355,6 @@ def get_llm_analysis(scored_players, cycles_info):
     """
     Ruft Gemini über das google-genai SDK auf und gibt einen Text zurück.
     Bei Fehlern kommt ein klarer Hinweis statt eines Absturzes.
-    AFC wird explizit deaktiviert, damit die SDK-Warnung nicht erscheint.
     """
     if not GEMINI_API_KEY:
         return "FEHLER: Kein GEMINI_API_KEY gefunden!"
@@ -387,7 +379,7 @@ Antworte in klarem Fliesstext ohne Markdown-Formatierung (keine Sternchen, keine
                 temperature=0.4,
                 max_output_tokens=700,
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                    disable=True  # AFC aus, damit keine Warnung und kein automatisches Tool-Calling.[web:122][web:159]
+                    disable=True
                 ),
             ),
         )
@@ -445,13 +437,11 @@ def send_telegram_messages(full_text):
 # ---------------------------------------------------------------------------
 
 def main():
-    # Secrets prüfen
     missing = [k for k, v in REQUIRED_SECRETS.items() if not v]
     if missing:
         print(f"Fehler: Folgende Secrets fehlen: {', '.join(missing)}")
         sys.exit(1)
 
-    # Login bei Kickbase
     payload = {"em": KB_EMAIL, "pass": KB_PASSWORD, "loy": False, "rep": {}}
     login_res_raw = session.post(
         "https://api.kickbase.com/v4/user/login",
@@ -478,7 +468,6 @@ def main():
 
     session.headers["Authorization"] = f"Bearer {token}"
 
-    # Daten holen
     news_headlines = get_news()
 
     ranking_res = session.get(
@@ -493,6 +482,33 @@ def main():
 
     players = sorted(market_res.get("it", []), key=lambda x: x.get("exs", 999999))
 
+    # -----------------------------------------------------------------
+    # TEMPORÄRER DEBUG-BLOCK: Startelf-Wahrscheinlichkeit erkunden
+    # (Nach dem ersten erfolgreichen Test kannst du diesen Block wieder löschen)
+    # -----------------------------------------------------------------
+    debug_player_id = players[0].get("id") if players else None
+    if debug_player_id:
+        try:
+            r1 = session.get(
+                f"https://api.kickbase.com/v4/leagues/{liga_id}/players/{debug_player_id}/performance",
+                timeout=CONFIG["REQUEST_TIMEOUT"],
+            )
+            print("PERFORMANCE:", r1.status_code, r1.text[:1500])
+        except Exception as e:
+            print("Fehler performance:", e)
+
+        try:
+            r2 = session.get(
+                f"https://api.kickbase.com/v4/leagues/{liga_id}/teamcenter/myeleven",
+                timeout=CONFIG["REQUEST_TIMEOUT"],
+            )
+            print("MYELEVEN:", r2.status_code, r2.text[:1500])
+        except Exception as e:
+            print("Fehler myeleven:", e)
+    # -----------------------------------------------------------------
+    # ENDE DEBUG-BLOCK
+    # -----------------------------------------------------------------
+
     blocked_teams = build_blocked_teams(liga_id, ranking_res, my_manager_id)
     my_team_counts = get_my_team_counts(liga_id, my_manager_id)
     mw_cycles = market_updates_until_first_matchday()
@@ -500,7 +516,6 @@ def main():
     msg = "⚽ <b>Markt-Update: Kickbase Elite</b>\n\n"
     scored_players = []
 
-    # Markt-Spieler durchgehen
     for p in players[:CONFIG["PLAYERS_TO_SHOW"]]:
         nachname = p.get("n", "Unbekannt")
         mw_str = f"{p.get('mv', 0):,}".replace(",", ".")
