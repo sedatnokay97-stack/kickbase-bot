@@ -3,6 +3,7 @@ import sys
 import re
 import json
 import time
+import base64
 import requests
 from bs4 import BeautifulSoup
 
@@ -13,6 +14,8 @@ KB_EMAIL = os.environ.get("KB_EMAIL")
 KB_PASSWORD = os.environ.get("KB_PASSWORD")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY")
 
 CONFIG = {
     "DRY_RUN": False,
@@ -122,18 +125,67 @@ def get_ligainsider_injuries():
 # KNOTEN 3: HISTORY & PROGNOSE ENGINE
 # ==========================================
 def load_history():
+    """
+    Laedt den Verlauf primaer aus dem GitHub-Repo (ueberlebt GitHub-Actions-Runs),
+    mit Fallback auf eine lokale Datei fuer Tests ausserhalb von Actions.
+    Gibt (history_dict, sha_oder_None) zurueck - sha wird beim Speichern gebraucht,
+    um die richtige Datei-Version im Repo zu ueberschreiben.
+    """
+    if GITHUB_TOKEN and GITHUB_REPOSITORY:
+        url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/{CONFIG['HISTORY_FILE']}"
+        headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+        try:
+            resp = requests.get(url, headers=headers, timeout=CONFIG["REQUEST_TIMEOUT"])
+            if resp.status_code == 404:
+                print("ℹ️ Noch kein Verlauf im Repo vorhanden - wird nach diesem Lauf angelegt.")
+                return {}, None
+            resp.raise_for_status()
+            data = resp.json()
+            content = base64.b64decode(data["content"]).decode("utf-8")
+            history = json.loads(content)
+            print(f"✅ Verlauf aus GitHub geladen ({len(history)} Spieler bekannt).")
+            return history, data.get("sha")
+        except Exception as e:
+            print(f"⚠️ Verlauf (GitHub) konnte nicht geladen werden: {e}")
+            return {}, None
+
+    print("ℹ️ Kein GITHUB_TOKEN/GITHUB_REPOSITORY gesetzt - nutze lokale Datei (nur fuer lokale Tests sinnvoll).")
     if os.path.exists(CONFIG["HISTORY_FILE"]):
         try:
             with open(CONFIG["HISTORY_FILE"], "r", encoding="utf-8") as f:
-                return json.load(f)
+                return json.load(f), None
         except Exception:
-            return {}
-    return {}
+            return {}, None
+    return {}, None
 
-def save_history(history):
+
+def save_history(history, sha=None):
+    """Speichert den Verlauf dorthin zurueck, wo er geladen wurde (GitHub oder lokale Datei)."""
+    content_str = json.dumps(history, indent=2, ensure_ascii=False)
+
+    if GITHUB_TOKEN and GITHUB_REPOSITORY:
+        url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/{CONFIG['HISTORY_FILE']}"
+        headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+        payload = {
+            "message": f"Update Kickbase-Verlauf {int(time.time())}",
+            "content": base64.b64encode(content_str.encode("utf-8")).decode("utf-8"),
+        }
+        if sha:
+            payload["sha"] = sha
+        try:
+            resp = requests.put(url, headers=headers, json=payload, timeout=CONFIG["REQUEST_TIMEOUT"])
+            resp.raise_for_status()
+            print("✅ Verlauf erfolgreich ins GitHub-Repo geschrieben.")
+            return
+        except Exception as e:
+            print(f"⚠️ Verlauf (GitHub) konnte nicht gespeichert werden: {e}")
+            # Kein Rueckfall auf lokale Datei hier, da die eh beim naechsten Run weg waere.
+            return
+
     try:
         with open(CONFIG["HISTORY_FILE"], "w", encoding="utf-8") as f:
-            json.dump(history, f, indent=2, ensure_ascii=False)
+            f.write(content_str)
+        print("✅ Verlauf lokal gespeichert.")
     except Exception as e:
         print(f"⚠️ History Speicherung fehlgeschlagen: {e}")
 
@@ -283,7 +335,7 @@ def main():
     
     starters = get_ligainsider_lineups()
     injured = get_ligainsider_injuries()
-    history = load_history()
+    history, history_sha = load_history()
     
     evaluated_list = []
     report_lines = [f"⚽ <b>Kickbase Markt-Report ({CONFIG['DAYS_UNTIL_MATCHDAY']} Tage bis Spieltag 1)</b>\n"]
@@ -308,7 +360,7 @@ def main():
             f"  💡 Empfehlung: <b>{res['recommendation']}</b>\n"
         )
     
-    save_history(history)
+    save_history(history, history_sha)
     
     full_report = "\n".join(report_lines)
     
