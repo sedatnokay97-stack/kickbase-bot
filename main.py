@@ -208,17 +208,9 @@ def get_lineup_prob(player):
         return None
 
 def diagnose_market_fields(players):
-    all_keys = set()
-    for p in players[:5]:
-        all_keys.update(p.keys())
-    print(f"🔬 MARKT-FELDER: {sorted(all_keys)}")
-    for p in players:
-        seller = get_seller_name(p)
-        if seller:
-            print(f"🔬 Angeboten von '{seller}': Spieler '{p.get('n')}'")
-            break
-    else:
-        print("🔬 Kein Spieler mit Verkaeufer-Feld gefunden.")
+    # Feldstruktur ist verifiziert (u=Anbieter-Dict, prob=Startelf-Wahrscheinlichkeit).
+    # Diagnose-Output nur noch bei unbekannten Feldern oder zur Fehlersuche aktiv.
+    pass
 
 def get_my_budget(token, league_id):
     for path in ["me/budget", "me"]:
@@ -754,12 +746,21 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     daily_trend, _ = compute_trend(deltas)
     momentum = compute_momentum(deltas) if has_real else "neutral"
 
-    # Overpay-Faktor = Basis × Quoten-Multiplikator × Momentum-Multiplikator
+    # Overpay-Faktor = Basis × Quoten × Momentum × Startelf-Wahrscheinlichkeit
     mf = matchup_factor(win_prob)
     mf_momentum = (CONFIG["MOMENTUM_BOOST"] if momentum == "beschleunigt"
                    else CONFIG["MOMENTUM_BRAKE"] if momentum == "verlangsamt"
                    else 1.0)
     overpay_factor = CONFIG["OVERPAY_BASE_FACTOR"] * mf * mf_momentum
+
+    # Kickbase Premium-Feld 'prob': Startelf-Wahrscheinlichkeit (verifiziert in Feldliste)
+    # Muss VOR predict() angewendet werden, damit es in max_bid einfließt.
+    lineup_prob = get_lineup_prob(player)
+    if lineup_prob is not None:
+        if lineup_prob >= 0.7:
+            overpay_factor *= 1.10   # Boost: Punkte wahrscheinlicher
+        elif lineup_prob < 0.3:
+            overpay_factor *= 0.85   # Abschlag: ohne Einsatz kein Marktwert-Anstieg
 
     proj_mv, max_bid, raw_profit = predict(mv, daily_trend, days_left, overpay_factor)
 
@@ -806,6 +807,7 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
         "opp_blocked": opp_blocked, "budget_ok": budget_ok,
         "category": category, "reason": reason,
         "fixture": fixture_info, "win_prob": win_prob,
+        "lineup_prob": lineup_prob,
         "overpay_factor": overpay_factor,
         "urgency_minutes": urgency_minutes, "is_urgent": is_urgent,
         "exs": exs,
@@ -858,11 +860,19 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                 f"   👉 Max. Gebot: <b>{fmt_money(p['max_bid'])} €</b>"
             )
             extras = []
+            if p.get("lineup_prob") is not None:
+                lp = p["lineup_prob"]
+                if lp >= 0.7:
+                    extras.append(f"🟢 Startelf {lp*100:.0f}%")
+                elif lp < 0.3:
+                    extras.append(f"🔴 Bank {lp*100:.0f}%")
+                else:
+                    extras.append(f"🟡 Rotation {lp*100:.0f}%")
             if p["fixture"]:
                 opps = ", ".join(p["fixture"]["opponents"])
                 extras.append(f"📅 {p['fixture']['label']} ({opps})")
             if p["win_prob"] is not None:
-                extras.append(f"🎰 {p['win_prob']*100:.0f}% Siegchance")
+                extras.append(f"🎰 {p['win_prob']*100:.0f}% Sieg")
             if p["opp_blocked"]:
                 extras.append(f"🔓 Verein bei {len(p['opp_blocked'])} Gegner(n) voll")
             if extras:
