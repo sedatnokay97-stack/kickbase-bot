@@ -289,48 +289,45 @@ def get_player_detail(token, league_id, player_id):
 
 def extract_player_stats(detail):
     """
-    Liest aus der Detailantwort:
-    - avg_points: Punkte-Schnitt letzte Saison
-    - mv_history: historischer Marktwert-Verlauf (Liste von Werten, aelteste zuerst)
-    - status_code: Kickbase-Startelf-Symbol (0=garantiert, 1=sicher, 2=unsicher,
-                   3=unwahrscheinlich, 4=bank - aus App-Beobachtung, unverifiziert)
-    Gibt Dict mit None-Werten zurueck wenn Felder nicht gefunden werden.
+    Liest aus der Detailantwort verifizierte Felder (Stand: Karius-Dump):
+    - daily_trend_api: tfhmvt = taeglicher Marktwert-Trend direkt von Kickbase
+    - status_code: prob = Startelf-Status (0=garantiert,1=sicher,2=Rotation,
+                   3=unwahrscheinlich,4=bank) - GANZZAHL, nicht Float
+    - mdsum: Restprogramm als Liste von Spielen mit Team-IDs und Datum
+    - mvt: Kickbase-Trend-Flag (1=steigend, 2=fallend)
+    Felder, die NICHT im Dump waren (noch unbekannt):
+    - avg_points (Punkte-Schnitt): weder ap noch stud/day ergibt sinnvollen Wert
+      -> bleibt None bis ein Feldspieler-Dump mit mehr Daten vorliegt
     """
     if not detail:
-        return {"avg_points": None, "mv_history_api": None, "status_code": None}
+        return {"daily_trend_api": None, "status_code": None, "mdsum": None, "mvt_flag": None}
 
-    # Punkte-Schnitt: verschiedene moegliche Feldnamen
-    avg = None
-    for k in ["ap", "avgPoints", "averagePoints", "avp", "sap"]:
-        v = detail.get(k)
-        if isinstance(v, (int, float)) and v > 0:
-            avg = round(float(v), 1)
-            break
+    # Tagestrend direkt von Kickbase (praziser als unser berechneter Median)
+    daily_trend_api = None
+    v = detail.get("tfhmvt")
+    if isinstance(v, (int, float)) and v != 0:
+        daily_trend_api = int(v)
 
-    # Historischer Marktwert-Verlauf
-    mv_hist = None
-    for k in ["mvHistory", "mvh", "marketValues", "mvl"]:
-        v = detail.get(k)
-        if isinstance(v, list) and v:
-            # Kickbase liefert oft Dicts mit "m" (Wert) und "d" (Datum)
-            if isinstance(v[0], dict):
-                vals = [x.get("m") or x.get("v") or x.get("value") for x in v]
-                vals = [x for x in vals if isinstance(x, (int, float)) and x > 0]
-            else:
-                vals = [x for x in v if isinstance(x, (int, float)) and x > 0]
-            if vals:
-                mv_hist = vals
-            break
+    # Startelf-Status: 'prob' ist eine Ganzzahl (0-4), NICHT ein Float
+    status_code = None
+    v = detail.get("prob")
+    if isinstance(v, int) and 0 <= v <= 4:
+        status_code = v
 
-    # Status-Code fuer Startelf-Prognose
-    status = None
-    for k in ["st", "status", "fit", "fitnessStatus"]:
-        v = detail.get(k)
-        if isinstance(v, int):
-            status = v
-            break
+    # Restprogramm aus Kickbase direkt (praeziser als OpenLigaDB-Scraping)
+    mdsum = detail.get("mdsum")
+    if not isinstance(mdsum, list):
+        mdsum = None
 
-    return {"avg_points": avg, "mv_history_api": mv_hist, "status_code": status}
+    # Kickbase Trend-Flag
+    mvt_flag = detail.get("mvt")
+
+    return {
+        "daily_trend_api": daily_trend_api,
+        "status_code": status_code,
+        "mdsum": mdsum,
+        "mvt_flag": mvt_flag,
+    }
 
 def count_by_team(items):
     c = {}
@@ -626,6 +623,46 @@ def get_team_key(name):
             return key
     return None
 
+
+def parse_mdsum(mdsum):
+    """
+    Wertet das 'mdsum'-Feld aus dem Kickbase-Detail-Endpunkt aus.
+    Liefert Restprogramm im gleichen Format wie fixture_difficulty().
+    Team-IDs in mdsum sind Kickbase-tids (String), nicht OpenLigaDB-Keys.
+    """
+    if not mdsum:
+        return None
+    opponents = []
+    for match in mdsum[:CONFIG["FIXTURE_LOOKAHEAD"]]:
+        if not isinstance(match, dict):
+            continue
+        # Wir brauchen die Gegner-tid - t1 und t2 sind beide Teams
+        # Der Spieler gehoert zu einem der beiden Teams (tid steht im Spieler-Feld)
+        # Wir nehmen beide und loesen spaeter auf
+        t1 = str(match.get("t1", ""))
+        t2 = str(match.get("t2", ""))
+        opponents.append((t1, t2))
+    if not opponents:
+        return None
+    # Staerken der Gegner-Teams bestimmen
+    # Wir kennen nicht direkt welches Team "unser" Spieler ist, deshalb
+    # nehmen wir den staerkeren Gegner als konservativere Schaetzung
+    labels = []
+    names = []
+    for t1, t2 in opponents:
+        k1 = KICKBASE_TID_TO_TEAM.get(t1)
+        k2 = KICKBASE_TID_TO_TEAM.get(t2)
+        s1 = TEAM_STRENGTH_LAST_SEASON.get(k1, TEAM_STRENGTH_DEFAULT) if k1 else TEAM_STRENGTH_DEFAULT
+        s2 = TEAM_STRENGTH_LAST_SEASON.get(k2, TEAM_STRENGTH_DEFAULT) if k2 else TEAM_STRENGTH_DEFAULT
+        # Staerkerer der beiden ist der Gegner (konservativ)
+        opp_key = k1 if s1 >= s2 else k2
+        opp_name = TEAM_DISPLAY_NAMES.get(opp_key, "?") if opp_key else "?"
+        names.append(opp_name)
+        labels.append(max(s1, s2))
+    avg = sum(labels) / len(labels)
+    label = "leicht" if avg <= 35 else ("mittel" if avg <= 55 else "schwer")
+    return {"label": label, "opponents": names}
+
 def days_until_next_matchday(fixtures, fallback):
     today = datetime.now(timezone.utc).date()
     upcoming = []
@@ -858,17 +895,24 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     mv = int(player.get("mv", player.get("m", 0)))
     exs = int(player.get("exs", 0))
 
-    # Spielerdetails (Punkteschnitt, historischer Verlauf, Statuscode)
-    stats = extract_player_stats(detail) if detail else {"avg_points": None, "mv_history_api": None, "status_code": None}
-    avg_points = stats["avg_points"]
+    # Spielerdetails (verifizierte Felder aus Karius-Dump)
+    stats = extract_player_stats(detail) if detail else {
+        "daily_trend_api": None, "status_code": None, "mdsum": None, "mvt_flag": None}
     status_code = stats["status_code"]
-
-    # Relatives Bewertungs-Signal
-    relative_value = score_relative_value(mv, avg_points, pos_code)
+    kb_daily_trend = stats["daily_trend_api"]
+    mdsum = stats["mdsum"]
 
     deltas, has_real = update_history(pid, mv, history, today_str)
-    daily_trend, _ = compute_trend(deltas)
-    momentum = compute_momentum(deltas) if has_real else "neutral"
+    calculated_trend, _ = compute_trend(deltas)
+    # Kickbase-eigener Tagestrend (tfhmvt) hat Vorrang - praeziser als unser Median
+    daily_trend = kb_daily_trend if kb_daily_trend is not None else calculated_trend
+    if kb_daily_trend is not None:
+        has_real = True   # Kickbase-Trend ist immer "echt"
+    momentum = compute_momentum(deltas) if len(deltas) >= 3 else "neutral"
+
+    # Restprogramm: Kickbase mdsum hat Vorrang vor OpenLigaDB wenn verfuegbar
+    if mdsum and not fixture_info:
+        fixture_info = parse_mdsum(mdsum)
 
     # Overpay-Faktor = Basis × Quoten × Momentum × Startelf-Status
     mf = matchup_factor(win_prob)
@@ -892,10 +936,6 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     urgency_minutes = exs // 60 if exs > 0 else None
     is_urgent = urgency_minutes is not None and urgency_minutes <= CONFIG["URGENCY_THRESHOLD_MINUTES"]
 
-    # Unterbewertet-Bonus: wenn relatives Modell zeigt dass Spieler viel zu guenstig ist
-    # -> auch ohne hohen Tages-Trend als "watch" einstufen
-    is_undervalued = relative_value is not None and relative_value > 0.25
-
     if violates:
         category, reason = "blocked", "2-Spieler-Regel: du hast schon 2 aus diesem Verein"
     elif is_injured:
@@ -903,19 +943,13 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     elif negative:
         category, reason = "blocked", "negative Schlagzeile — erst prüfen"
     elif not has_real or max_bid is None:
-        # Unterbewertet-Spieler trotzdem als watch markieren, auch ohne Trendvergleich
-        if is_undervalued:
-            category = "watch"
-            reason = f"strukturell unterbewertet (Ø {avg_points} Pkt, aber kein Trendvergleich noch)"
-        else:
-            category, reason = "pending", "noch kein Tagesvergleich — morgen entscheiden"
+        category, reason = "pending", "noch kein Tagesvergleich — morgen entscheiden"
     elif my_budget is not None and max_bid > my_budget:
         category, reason = "blocked", f"Gebot {fmt_money(max_bid)} über Budget"
     elif raw_profit >= 1_500_000:
         category, reason = "top", "hoher erwarteter Gewinn"
-    elif raw_profit >= CONFIG["MIN_PROFIT_FOR_TOP"] or is_undervalued:
-        category = "watch"
-        reason = "strukturell unterbewertet" if is_undervalued else "solider Aufwärtstrend"
+    elif raw_profit >= CONFIG["MIN_PROFIT_FOR_TOP"]:
+        category, reason = "watch", "solider Aufwärtstrend"
     else:
         category, reason = "skip", "kein nennenswerter Trend"
 
@@ -924,14 +958,13 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     return {
         "id": pid, "name": name, "mv": mv, "proj_mv": proj_mv,
         "max_bid": max_bid, "exp_profit": raw_profit,
-        "daily_trend": daily_trend, "momentum": momentum,
-        "has_real": has_real, "is_injured": is_injured,
-        "matched_news": matched_news, "violates": violates,
-        "opp_blocked": opp_blocked, "budget_ok": budget_ok,
+        "daily_trend": daily_trend, "kb_trend": kb_daily_trend,
+        "momentum": momentum, "has_real": has_real,
+        "is_injured": is_injured, "matched_news": matched_news,
+        "violates": violates, "opp_blocked": opp_blocked, "budget_ok": budget_ok,
         "category": category, "reason": reason,
         "fixture": fixture_info, "win_prob": win_prob,
-        "avg_points": avg_points, "status_code": status_code,
-        "relative_value": relative_value, "is_undervalued": is_undervalued,
+        "status_code": status_code,
         "overpay_factor": overpay_factor,
         "urgency_minutes": urgency_minutes, "is_urgent": is_urgent,
         "exs": exs,
@@ -984,17 +1017,12 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                 f"   👉 Max. Gebot: <b>{fmt_money(p['max_bid'])} €</b>"
             )
             extras = []
-            # Startelf-Status aus Kickbase direkt (verifizierte Symbole)
             sc = p.get("status_code")
             if sc is not None and sc in STATUS_ICONS:
                 extras.append(f"{STATUS_ICONS[sc]} {STATUS_LABELS[sc]}")
-            # Punkte-Schnitt letzte Saison
-            if p.get("avg_points"):
-                extras.append(f"📊 Ø {p['avg_points']} Pkt")
-            # Relatives Bewertungs-Signal
-            if p.get("is_undervalued"):
-                rv = p.get("relative_value", 0)
-                extras.append(f"💎 unterbewertet ({rv*100:.0f}% unter erwartetem MW)")
+            # Kickbase-Tagestrend anzeigen wenn er von Kickbase direkt kommt
+            if p.get("kb_trend") is not None:
+                extras.append(f"📈 KB-Trend {fmt_profit(p['kb_trend'])} €/Tag")
             if p["fixture"]:
                 opps = ", ".join(p["fixture"]["opponents"])
                 extras.append(f"📅 {p['fixture']['label']} ({opps})")
