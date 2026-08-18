@@ -959,7 +959,7 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
     if offered:
         footer_parts.append(f"{len(offered)} von Mitgliedern angeboten (getrackt)")
     if footer_parts:
-        lines.append(f"\nℹ️ Ausgeblendet aber getrackt: {' + '.join(footer_parts)}.")
+        lines.append(f"\nℹ️ Ausgeblendet aber getrackt: {' · '.join(footer_parts)}.")
 
     if opponent_profiles:
         lines.append("\n🕵️ Konkurrenz-Radar")
@@ -969,8 +969,7 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
 
     if transfer_summary:
         lines.append("\n💸 Transfer-Aktivität")
-        for mgr, info in sorted(transfer_summary.items(),
-                                key=lambda x: x[1]["total"], reverse=True)[:7]:
+        for mgr, info in sorted(transfer_summary.items(), key=lambda x: x[1]["total"], reverse=True)[:7]:
             pl = ", ".join(info["players"])
             lines.append(f"• {esc(mgr)}: {info['count']}×, {fmt_money(info['total'])} € ({esc(pl)})")
 
@@ -979,21 +978,21 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
 # ==========================================
 # KNOTEN 8: TELEGRAM
 # ==========================================
-def split_message(message, max_len):
+def split_message(message, maxlen):
     chunks, current = [], ""
     for line in message.splitlines():
         line = line.rstrip()
-        while len(line) > max_len:
+        while len(line) > maxlen:
             if current:
                 chunks.append(current)
                 current = ""
-            sp = line.rfind(" ", 0, max_len)
+            sp = line.rfind(" ", 0, maxlen)
             if sp <= 0:
-                sp = max_len
+                sp = maxlen
             chunks.append(line[:sp])
             line = line[sp:].lstrip()
         cand = line if not current else f"{current}\n{line}"
-        if len(cand) > max_len:
+        if len(cand) > maxlen:
             if current:
                 chunks.append(current)
             current = line
@@ -1005,16 +1004,16 @@ def split_message(message, max_len):
 
 def send_telegram(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        raise ValueError("❌ Telegram-Zugangsdaten fehlen.")
+        raise ValueError("Telegram-Zugangsdaten fehlen.")
     chunks = split_message(message, CONFIG["TELEGRAM_MAX_LEN"])
-    print(f"DEBUG Telegram: {len(chunks)} Teil(e)...")
+    print(f"DEBUG Telegram {len(chunks)} Teile...")
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     for i, chunk in enumerate(chunks, 1):
         resp = requests.post(url, json={
             "chat_id": TELEGRAM_CHAT_ID, "text": chunk,
             "parse_mode": "HTML", "disable_web_page_preview": True,
         }, timeout=CONFIG["REQUEST_TIMEOUT"])
-        print(f"DEBUG Telegram {i}/{len(chunks)} ({len(chunk)} Z.): HTTP {resp.status_code}")
+        print(f"DEBUG Telegram {i}/{len(chunks)} {len(chunk)}Z. HTTP {resp.status_code}")
         if resp.ok:
             time.sleep(0.25)
             continue
@@ -1025,28 +1024,26 @@ def send_telegram(message):
         time.sleep(0.25)
 
 # ==========================================
-# HAUPTABLAUF
+# MAIN
 # ==========================================
 def main():
-    print("🚀 Starte Kickbase Bot Engine...")
-
+    print("Starte Kickbase Bot Engine...")
     token, league_id, my_manager_id = kickbase_login()
     all_market = get_market_players(token, league_id)
     diagnose_market_fields(all_market)
 
     free_players = [p for p in all_market if is_free_market_player(p)]
     offered_players = [p for p in all_market if not is_free_market_player(p)]
-    print(f"📊 {len(all_market)} Spieler am Markt: {len(free_players)} frei, "
+    print(f"{len(all_market)} Spieler am Markt: {len(free_players)} frei, "
           f"{len(offered_players)} von Mitgliedern angeboten (getrackt, ausgeblendet).")
 
     injured = get_ligainsider_injuries()
     headlines = get_rss_headlines()
-    print(f"📰 {len(headlines)} Schlagzeilen, {len(injured)} Verletzten-Eintraege.")
+    print(f"{len(headlines)} Schlagzeilen, {len(injured)} Verletzten-Eintraege.")
 
     history, history_sha = load_history()
-
     my_budget = get_my_budget(token, league_id)
-    print(f"💳 Budget: {fmt_money(my_budget)} €" if my_budget else "⚠️ Budget unbekannt.")
+    print(f"Budget: {fmt_money(my_budget)}" if my_budget else "Budget unbekannt.")
 
     ranking_res = get_ranking(token, league_id)
     my_team_counts = get_my_team_counts(token, league_id, my_manager_id)
@@ -1056,23 +1053,22 @@ def main():
     feed_items = get_league_feed(token, league_id)
     transfers = parse_feed(feed_items)
     transfer_summary = summarize_transfers(transfers)
-    print(f"💸 Transfers im Feed: {len(transfers)}")
+    print(f"Transfers im Feed: {len(transfers)}")
 
     season_fixtures = get_season_fixtures()
     days_left = days_until_next_matchday(season_fixtures, CONFIG["DAYS_UNTIL_MATCHDAY"])
-    print(f"📅 Tage bis zum naechsten Spiel: {days_left}")
+    print(f"Tage bis zum naechsten Spiel: {days_left}")
 
     win_probs = get_bundesliga_odds()
-
     fixture_cache, unmapped = {}, set()
     today_str = datetime.now(timezone.utc).date().isoformat()
-    evaluated = []
 
+    evaluated = []
     for p in all_market:
         tid_str = str(p.get("tid")) if p.get("tid") else None
         team_key = KICKBASE_TID_TO_TEAM.get(tid_str) if tid_str else None
         if tid_str and not team_key and tid_str not in unmapped:
-            print(f"ℹ️ tid {tid_str} nicht zugeordnet (Spieler: {p.get('n')}).")
+            print(f"tid {tid_str} nicht zugeordnet: Spieler {p.get('n')}.")
             unmapped.add(tid_str)
         if team_key and team_key not in fixture_cache:
             fixture_cache[team_key] = fixture_difficulty(season_fixtures, team_key)
@@ -1084,33 +1080,26 @@ def main():
             pid_str = p.get("id", p.get("i"))
             if pid_str:
                 detail = get_player_detail(token, league_id, pid_str)
-                time.sleep(0.2)
+            time.sleep(0.2)
 
-        res = evaluate_player(
-            p, history, injured, headlines, days_left,
-            my_team_counts, blocked_teams, my_budget,
-            fixture_info, win_prob, today_str, detail=detail)
-
+        res = evaluate_player(p, history, injured, headlines, days_left,
+                               my_team_counts, blocked_teams, my_budget,
+                               fixture_info, win_prob, today_str, detail=detail)
         if not is_free_market_player(p):
             seller = get_seller_name(p) or "?"
             res["category"] = "market_offer"
             res["reason"] = f"angeboten von {seller}"
-
         evaluated.append(res)
 
     real_count = sum(1 for p in evaluated if p["has_real"])
     urgent_count = sum(1 for p in evaluated if p["is_urgent"])
-    print(f"📈 Echte Trendsdaten: {real_count}/{len(evaluated)}, Urgency-Alerts: {urgent_count}")
+    print(f"Echte Trendsdaten: {real_count}/{len(evaluated)}, Urgency-Alerts: {urgent_count}")
 
     save_history(history, history_sha)
-
-    report = build_report(
-        evaluated, my_budget, days_left,
-        opponent_profiles, transfer_summary,
-        lineups_ok=False,
-        odds_ok=bool(win_probs))
+    report = build_report(evaluated, my_budget, days_left, opponent_profiles,
+                          transfer_summary, lineups_ok=False, odds_ok=bool(win_probs))
     send_telegram(report)
-    print("✅ Pipeline-Durchlauf vollkommen erfolgreich beendet!")
+    print("Pipeline-Durchlauf vollkommen erfolgreich beendet!")
 
 if __name__ == "__main__":
     main()
