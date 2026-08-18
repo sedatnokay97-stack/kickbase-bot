@@ -33,7 +33,8 @@ CONFIG = {
     "SEASON_YEAR": 2026,
     "FIXTURE_LOOKAHEAD": 3,
     "TOP_DETAIL_COUNT": 10,
-    "MIN_PROFIT_FOR_TOP": 500_000,
+    "MIN_PROFIT_FOR_TOP": 300_000,   # Schwelle fuer BESTE CHANCEN (Gewinn-basiert)
+    "MIN_TEAMWERT_STATUS": 2,        # Max. status_code fuer Teamwert-Empfehlung (0=garantiert,1=sicher,2=Rotation)
     "NEWS_MAX_PER_PLAYER": 2,
     "FEED_DEBUG_DUMP": False,
     # Urgency: Auktionen mit weniger als X Minuten Restlaufzeit kommen ganz oben
@@ -101,6 +102,17 @@ TEAM_STRENGTH_LAST_SEASON = {
 TEAM_STRENGTH_DEFAULT = 45
 POSITION_NAMES = {1: "TW", 2: "ABW", 3: "MF", 4: "ANG"}
 POSITION_MIN_NEEDED = {1: 1, 2: 3, 3: 3, 4: 1}
+
+# Kickbase Durchschnittspunkte-Schwellen fuer Teamwert-Empfehlung
+# Spieler oberhalb dieser Grenze gelten als punktestark genug fuer die Sektion
+# (wird mit echten avg_points-Daten kalibriert, sobald das Feld verfuegbar ist)
+TEAMWERT_MIN_AVG_POINTS = {
+    1: 25,   # Torhüter
+    2: 30,   # Abwehr
+    3: 35,   # Mittelfeld
+    4: 40,   # Angriff
+}
+TEAMWERT_MIN_AVG_POINTS_DEFAULT = 30
 
 # ==========================================
 # HILFSFUNKTIONEN
@@ -173,7 +185,6 @@ def get_market_players(token, league_id):
     print(f"⚠️ DEBUG RAW MARKTDATEN: {json.dumps(data)[:800]}")
     return []
 
-# Felder, die bei Kickbase ueblicherweise einen ANBIETENDEN Manager kennzeichnen.
 SELLER_FIELD_CANDIDATES = ["u", "unm", "unn", "usm", "uid", "seller", "ownerId", "oid", "own"]
 
 def get_seller_name(player):
@@ -282,9 +293,11 @@ def extract_player_stats(detail):
       3=unwahrscheinlich,4=bank) - GANZZAHL, nicht Float
     - mdsum: Restprogramm als Liste von Spielen mit Team-IDs und Datum
     - mvt: Kickbase-Trend-Flag (1=steigend, 2=fallend)
+    - avg_points: Punkteschnitt (ap oder stpkt, noch nicht verifiziert fuer Feldspieler)
     """
     if not detail:
-        return {"daily_trend_api": None, "status_code": None, "mdsum": None, "mvt_flag": None}
+        return {"daily_trend_api": None, "status_code": None, "mdsum": None,
+                "mvt_flag": None, "avg_points": None}
 
     daily_trend_api = None
     v = detail.get("tfhmvt")
@@ -302,11 +315,20 @@ def extract_player_stats(detail):
 
     mvt_flag = detail.get("mvt")
 
+    # Punkteschnitt: mehrere moegliche Feldnamen probieren
+    avg_points = None
+    for apkey in ["ap", "stpkt", "avgPoints", "avp", "pts"]:
+        v = detail.get(apkey)
+        if isinstance(v, (int, float)) and v > 0:
+            avg_points = float(v)
+            break
+
     return {
         "daily_trend_api": daily_trend_api,
         "status_code": status_code,
         "mdsum": mdsum,
         "mvt_flag": mvt_flag,
+        "avg_points": avg_points,
     }
 
 def count_by_team(items):
@@ -757,7 +779,7 @@ def predict(current_mv, daily_trend, days_left, overpay_factor):
 STATUS_ICONS = {
     0: "🔵",  # garantiert
     1: "🟢",  # sicher
-    2: "🟡",  # unsicher / Rotation
+    2: "🟡",  # Rotation
     3: "🟠",  # unwahrscheinlich
     4: "🔴",  # wahrscheinlich nicht
 }
@@ -779,11 +801,43 @@ def lineup_factor_from_status(status_code):
     return STATUS_FACTORS.get(status_code, 1.0)
 
 def score_relative_value(mv, avg_points, pos_code):
+    """
+    Relatives Bewertungsmodell: Ist der Spieler guenstig fuer seine Leistung?
+    Positiver Score = Spieler ist UNTER dem erwarteten Marktwert -> Kaufgelegenheit.
+    Negativer Score = Spieler ist UEBER dem erwarteten Wert (teuer).
+    Rueckgabe: float oder None
+    """
     if not avg_points or avg_points <= 0 or not mv or mv <= 0:
         return None
     pos_mult = {1: 80_000, 2: 100_000, 3: 120_000, 4: 150_000}.get(pos_code, 100_000)
     expected_mv = avg_points * pos_mult
     return (expected_mv - mv) / max(mv, 1_000_000)
+
+def is_teamwert_candidate(player_result):
+    """
+    Prueft ob ein Spieler fuer die Teamwert-Empfehlung qualifiziert:
+    - Nicht geblockt / verletzt / Budget-Problem
+    - Startelf-Status sicher genug (status_code <= MIN_TEAMWERT_STATUS)
+    - avg_points vorhanden UND ueber Positions-Schwelle
+      ODER avg_points unbekannt aber positiver relative_value_score
+    """
+    if player_result["category"] in ("blocked", "market_offer"):
+        return False
+    sc = player_result.get("status_code")
+    if sc is not None and sc > CONFIG["MIN_TEAMWERT_STATUS"]:
+        return False
+    avg_pts = player_result.get("avg_points")
+    pos = player_result.get("pos_code")
+    min_pts = TEAMWERT_MIN_AVG_POINTS.get(pos, TEAMWERT_MIN_AVG_POINTS_DEFAULT)
+    if avg_pts is not None and avg_pts >= min_pts:
+        return True
+    rv = player_result.get("relative_value_score")
+    if rv is not None and rv > 0:
+        return True
+    # Kein avg_points-Feld bisher verfuegbar: positive KB-Trend + guter Status reichen
+    if avg_pts is None and sc is not None and sc <= 1:
+        return True
+    return False
 
 def evaluate_player(player, history, injured_list, headlines, days_left,
                     my_team_counts=None, blocked_teams=None, my_budget=None,
@@ -805,10 +859,12 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     exs = int(player.get("exs", 0))
 
     stats = extract_player_stats(detail) if detail else {
-        "daily_trend_api": None, "status_code": None, "mdsum": None, "mvt_flag": None}
+        "daily_trend_api": None, "status_code": None, "mdsum": None,
+        "mvt_flag": None, "avg_points": None}
     status_code = stats["status_code"]
     kb_daily_trend = stats["daily_trend_api"]
     mdsum = stats["mdsum"]
+    avg_points = stats["avg_points"]
 
     deltas, has_real = update_history(pid, mv, history, today_str)
     calculated_trend, _ = compute_trend(deltas)
@@ -859,8 +915,9 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
         category, reason = "skip", "kein nennenswerter Trend"
 
     budget_ok = max_bid is None or my_budget is None or max_bid <= my_budget
+    relative_value_score = score_relative_value(mv, avg_points, pos_code)
 
-    return {
+    result = {
         "id": pid, "name": name, "mv": mv, "proj_mv": proj_mv,
         "max_bid": max_bid, "exp_profit": raw_profit,
         "daily_trend": daily_trend, "kb_trend": kb_daily_trend,
@@ -870,10 +927,14 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
         "category": category, "reason": reason,
         "fixture": fixture_info, "win_prob": win_prob,
         "status_code": status_code,
+        "pos_code": pos_code,
+        "avg_points": avg_points,
+        "relative_value_score": relative_value_score,
         "overpay_factor": overpay_factor,
         "urgency_minutes": urgency_minutes, "is_urgent": is_urgent,
         "exs": exs,
     }
+    return result
 
 # ==========================================
 # KNOTEN 7: REPORT
@@ -909,10 +970,10 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                 f" | Gebot bis {fmt_money(p['max_bid'])} €"
             )
 
-    detail = [p for p in tops + watch if not p["is_urgent"]][:CONFIG["TOP_DETAIL_COUNT"]]
-    if detail:
+    detail_list = [p for p in tops + watch if not p["is_urgent"]][:CONFIG["TOP_DETAIL_COUNT"]]
+    if detail_list:
         lines.append("\n🔥 BESTE CHANCEN (nach erwartetem Gewinn)")
-        for i, p in enumerate(detail, start=1):
+        for i, p in enumerate(detail_list, start=1):
             momentum_icon = " 🚀" if p["momentum"] == "beschleunigt" else (" 📉" if p["momentum"] == "verlangsamt" else "")
             lines.append(
                 f"\n{i}. {esc(p['name'])} — {fmt_money(p['mv'])} €{momentum_icon}\n"
@@ -944,6 +1005,34 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
         lines.append("\n👀 Weitere")
         for p in rest:
             lines.append(f"• {esc(p['name'])} — {fmt_money(p['mv'])} € ({fmt_profit(p['exp_profit'])} €)")
+
+    # ---- TEAMWERT-EMPFEHLUNGEN: Spieler mit Punktequalitaet unabhaengig vom Tagestrend ----
+    teamwert_pool = [p for p in evaluated if is_teamwert_candidate(p)]
+    # Deduplizieren: Spieler die schon in BESTE CHANCEN stehen, nicht nochmal zeigen
+    beste_chancen_ids = {p["id"] for p in detail_list + rest}
+    teamwert_neu = [p for p in teamwert_pool if p["id"] not in beste_chancen_ids]
+    # Sortierung: status_code aufsteigend (sicherer = besser), dann avg_points absteigend
+    teamwert_neu.sort(key=lambda x: (
+        x.get("status_code") if x.get("status_code") is not None else 99,
+        -(x.get("avg_points") or 0),
+    ))
+    if teamwert_neu:
+        lines.append("\n⭐ TEAMWERT-EMPFEHLUNGEN (Qualität unabhängig vom Trend)")
+        for p in teamwert_neu[:8]:
+            sc = p.get("status_code")
+            status_str = f"{STATUS_ICONS.get(sc, '')} {STATUS_LABELS.get(sc, '?')}" if sc is not None else "❓ Status unbekannt"
+            avg_str = f" · ⚽ Ø {p['avg_points']:.1f} Pkt" if p.get("avg_points") else ""
+            rv = p.get("relative_value_score")
+            rv_str = f" · 💎 Wert +{rv:.2f}" if rv is not None and rv > 0 else ""
+            trend_str = f" · 📈 {fmt_profit(p['kb_trend'])} €/Tag" if p.get("kb_trend") is not None else ""
+            bid_str = f"\n   👉 Max. Gebot: {fmt_money(p['max_bid'])} €" if p.get("max_bid") else ""
+            lines.append(
+                f"\n• {esc(p['name'])} — {fmt_money(p['mv'])} €\n"
+                f"   {status_str}{avg_str}{rv_str}{trend_str}{bid_str}"
+            )
+            if p["fixture"]:
+                opps = ", ".join(p["fixture"]["opponents"])
+                lines.append(f"   📅 {p['fixture']['label']} ({opps})")
 
     if blocked:
         lines.append("\n🚫 Nicht bieten")
