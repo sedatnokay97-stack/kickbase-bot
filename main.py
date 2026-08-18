@@ -35,8 +35,13 @@ CONFIG = {
     "TOP_DETAIL_COUNT": 10,
     "MIN_PROFIT_FOR_TOP": 300_000,   # Schwelle fuer BESTE CHANCEN (Gewinn-basiert)
     "MIN_TEAMWERT_STATUS": 2,        # Max. status_code fuer Teamwert-Empfehlung (0=garantiert,1=sicher,2=Rotation)
+    "MAX_PER_TEAM_EARLY": 3,          # Vor-Saison-Lockerung der 2-Spieler-Regel
+    "MAX_PER_TEAM_FROM_MATCHDAY": 3,  # Ab diesem Spieltag greift wieder die normale Regel (2)
     "NEWS_MAX_PER_PLAYER": 2,
     "FEED_DEBUG_DUMP": False,
+    # Confidence-Daempfung fuer relative_value_score in den ersten Spieltagen
+    "RV_CONFIDENCE_FULL_AT_MATCHDAY": 4,
+    "RV_CONFIDENCE_BASE": 0.5,
     # Urgency: Auktionen mit weniger als X Minuten Restlaufzeit kommen ganz oben
     "URGENCY_THRESHOLD_MINUTES": 180,
     # Odds API
@@ -103,14 +108,11 @@ TEAM_STRENGTH_DEFAULT = 45
 POSITION_NAMES = {1: "TW", 2: "ABW", 3: "MF", 4: "ANG"}
 POSITION_MIN_NEEDED = {1: 1, 2: 3, 3: 3, 4: 1}
 
-# Kickbase Durchschnittspunkte-Schwellen fuer Teamwert-Empfehlung
-# Spieler oberhalb dieser Grenze gelten als punktestark genug fuer die Sektion
-# (wird mit echten avg_points-Daten kalibriert, sobald das Feld verfuegbar ist)
 TEAMWERT_MIN_AVG_POINTS = {
-    1: 25,   # Torhüter
-    2: 30,   # Abwehr
-    3: 35,   # Mittelfeld
-    4: 40,   # Angriff
+    1: 25,
+    2: 30,
+    3: 35,
+    4: 40,
 }
 TEAMWERT_MIN_AVG_POINTS_DEFAULT = 30
 
@@ -188,7 +190,6 @@ def get_market_players(token, league_id):
 SELLER_FIELD_CANDIDATES = ["u", "unm", "unn", "usm", "uid", "seller", "ownerId", "oid", "own"]
 
 def get_seller_name(player):
-    """Liest den Anbieter-Namen aus dem Spieler-Datensatz."""
     u = player.get("u")
     if isinstance(u, dict):
         return u.get("n") or u.get("name")
@@ -201,7 +202,6 @@ def get_seller_name(player):
     return None
 
 def is_free_market_player(player):
-    """True = von Kickbase gestellt (frei bietbar), False = von Mitglied angeboten."""
     return get_seller_name(player) is None
 
 def get_lineup_prob(player):
@@ -286,15 +286,6 @@ def get_player_detail(token, league_id, player_id):
     return None
 
 def extract_player_stats(detail):
-    """
-    Liest aus der Detailantwort verifizierte Felder (Stand: Karius-Dump):
-    - daily_trend_api: tfhmvt = taeglicher Marktwert-Trend direkt von Kickbase
-    - status_code: prob = Startelf-Status (0=garantiert,1=sicher,2=Rotation,
-      3=unwahrscheinlich,4=bank) - GANZZAHL, nicht Float
-    - mdsum: Restprogramm als Liste von Spielen mit Team-IDs und Datum
-    - mvt: Kickbase-Trend-Flag (1=steigend, 2=fallend)
-    - avg_points: Punkteschnitt (ap oder stpkt, noch nicht verifiziert fuer Feldspieler)
-    """
     if not detail:
         return {"daily_trend_api": None, "status_code": None, "mdsum": None,
                 "mvt_flag": None, "avg_points": None}
@@ -315,7 +306,6 @@ def extract_player_stats(detail):
 
     mvt_flag = detail.get("mvt")
 
-    # Punkteschnitt: mehrere moegliche Feldnamen probieren
     avg_points = None
     for apkey in ["ap", "stpkt", "avgPoints", "avp", "pts"]:
         v = detail.get(apkey)
@@ -664,6 +654,12 @@ def fixture_difficulty(fixtures, team_key):
     label = "leicht" if avg <= 35 else ("mittel" if avg <= 55 else "schwer")
     return {"label": label, "opponents": names}
 
+def count_matchdays_played(fixtures):
+    if not fixtures:
+        return 0
+    finished = sum(1 for m in fixtures if m.get("matchIsFinished"))
+    return finished // 9
+
 # ==========================================
 # KNOTEN 5: HISTORY, TREND & MOMENTUM
 # ==========================================
@@ -777,11 +773,11 @@ def predict(current_mv, daily_trend, days_left, overpay_factor):
 # KNOTEN 6: SPIELER-BEWERTUNG
 # ==========================================
 STATUS_ICONS = {
-    0: "🔵",  # garantiert
-    1: "🟢",  # sicher
-    2: "🟡",  # Rotation
-    3: "🟠",  # unwahrscheinlich
-    4: "🔴",  # wahrscheinlich nicht
+    0: "🔵",
+    1: "🟢",
+    2: "🟡",
+    3: "🟠",
+    4: "🔴",
 }
 
 STATUS_LABELS = {
@@ -801,26 +797,24 @@ def lineup_factor_from_status(status_code):
     return STATUS_FACTORS.get(status_code, 1.0)
 
 def score_relative_value(mv, avg_points, pos_code):
-    """
-    Relatives Bewertungsmodell: Ist der Spieler guenstig fuer seine Leistung?
-    Positiver Score = Spieler ist UNTER dem erwarteten Marktwert -> Kaufgelegenheit.
-    Negativer Score = Spieler ist UEBER dem erwarteten Wert (teuer).
-    Rueckgabe: float oder None
-    """
     if not avg_points or avg_points <= 0 or not mv or mv <= 0:
         return None
     pos_mult = {1: 80_000, 2: 100_000, 3: 120_000, 4: 150_000}.get(pos_code, 100_000)
     expected_mv = avg_points * pos_mult
     return (expected_mv - mv) / max(mv, 1_000_000)
 
+def confidence_weighted_score(rv_score, matchdays_played):
+    if rv_score is None:
+        return None
+    full_at = CONFIG["RV_CONFIDENCE_FULL_AT_MATCHDAY"]
+    base = CONFIG["RV_CONFIDENCE_BASE"]
+    if matchdays_played is None or matchdays_played <= 0 or matchdays_played >= full_at:
+        return rv_score
+    step = (1.0 - base) / full_at
+    damping = base + (matchdays_played * step)
+    return rv_score * damping
+
 def is_teamwert_candidate(player_result):
-    """
-    Prueft ob ein Spieler fuer die Teamwert-Empfehlung qualifiziert:
-    - Nicht geblockt / verletzt / Budget-Problem
-    - Startelf-Status sicher genug (status_code <= MIN_TEAMWERT_STATUS)
-    - avg_points vorhanden UND ueber Positions-Schwelle
-      ODER avg_points unbekannt aber positiver relative_value_score
-    """
     if player_result["category"] in ("blocked", "market_offer"):
         return False
     sc = player_result.get("status_code")
@@ -834,7 +828,6 @@ def is_teamwert_candidate(player_result):
     rv = player_result.get("relative_value_score")
     if rv is not None and rv > 0:
         return True
-    # Kein avg_points-Feld bisher verfuegbar: positive KB-Trend + guter Status reichen
     if avg_pts is None and sc is not None and sc <= 1:
         return True
     return False
@@ -842,7 +835,7 @@ def is_teamwert_candidate(player_result):
 def evaluate_player(player, history, injured_list, headlines, days_left,
                     my_team_counts=None, blocked_teams=None, my_budget=None,
                     fixture_info=None, win_prob=None, today_str=None,
-                    detail=None):
+                    detail=None, matchdays_played=None):
     pid = player.get("id", player.get("i"))
     tid = player.get("tid")
     pos_code = None
@@ -916,6 +909,7 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
 
     budget_ok = max_bid is None or my_budget is None or max_bid <= my_budget
     relative_value_score = score_relative_value(mv, avg_points, pos_code)
+    relative_value_score = confidence_weighted_score(relative_value_score, matchdays_played)
 
     result = {
         "id": pid, "name": name, "mv": mv, "proj_mv": proj_mv,
@@ -1006,12 +1000,9 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
         for p in rest:
             lines.append(f"• {esc(p['name'])} — {fmt_money(p['mv'])} € ({fmt_profit(p['exp_profit'])} €)")
 
-    # ---- TEAMWERT-EMPFEHLUNGEN: Spieler mit Punktequalitaet unabhaengig vom Tagestrend ----
     teamwert_pool = [p for p in evaluated if is_teamwert_candidate(p)]
-    # Deduplizieren: Spieler die schon in BESTE CHANCEN stehen, nicht nochmal zeigen
     beste_chancen_ids = {p["id"] for p in detail_list + rest}
     teamwert_neu = [p for p in teamwert_pool if p["id"] not in beste_chancen_ids]
-    # Sortierung: status_code aufsteigend (sicherer = besser), dann avg_points absteigend
     teamwert_neu.sort(key=lambda x: (
         x.get("status_code") if x.get("status_code") is not None else 99,
         -(x.get("avg_points") or 0),
@@ -1134,6 +1125,17 @@ def main():
     my_budget = get_my_budget(token, league_id)
     print(f"Budget: {fmt_money(my_budget)}" if my_budget else "Budget unbekannt.")
 
+    season_fixtures = get_season_fixtures()
+    days_left = days_until_next_matchday(season_fixtures, CONFIG["DAYS_UNTIL_MATCHDAY"])
+    print(f"Tage bis zum naechsten Spiel: {days_left}")
+
+    matchdays_played = count_matchdays_played(season_fixtures)
+    if matchdays_played < CONFIG["MAX_PER_TEAM_FROM_MATCHDAY"]:
+        CONFIG["MAX_PER_TEAM"] = CONFIG["MAX_PER_TEAM_EARLY"]
+    else:
+        CONFIG["MAX_PER_TEAM"] = 2
+    print(f"Spieltage absolviert: {matchdays_played} -> MAX_PER_TEAM = {CONFIG['MAX_PER_TEAM']}")
+
     ranking_res = get_ranking(token, league_id)
     my_team_counts = get_my_team_counts(token, league_id, my_manager_id)
     blocked_teams, opponent_profiles = analyze_opponents(
@@ -1143,10 +1145,6 @@ def main():
     transfers = parse_feed(feed_items)
     transfer_summary = summarize_transfers(transfers)
     print(f"Transfers im Feed: {len(transfers)}")
-
-    season_fixtures = get_season_fixtures()
-    days_left = days_until_next_matchday(season_fixtures, CONFIG["DAYS_UNTIL_MATCHDAY"])
-    print(f"Tage bis zum naechsten Spiel: {days_left}")
 
     win_probs = get_bundesliga_odds()
     fixture_cache, unmapped = {}, set()
@@ -1173,7 +1171,8 @@ def main():
 
         res = evaluate_player(p, history, injured, headlines, days_left,
                                my_team_counts, blocked_teams, my_budget,
-                               fixture_info, win_prob, today_str, detail=detail)
+                               fixture_info, win_prob, today_str, detail=detail,
+                               matchdays_played=matchdays_played)
         if not is_free_market_player(p):
             seller = get_seller_name(p) or "?"
             res["category"] = "market_offer"
