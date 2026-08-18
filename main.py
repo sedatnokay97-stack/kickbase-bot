@@ -5,6 +5,7 @@ import json
 import time
 import base64
 import requests
+from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 
 # ==========================================
@@ -21,23 +22,23 @@ CONFIG = {
     "DRY_RUN": False,
     "TELEGRAM_MAX_LEN": 4000,
     "REQUEST_TIMEOUT": 15,
-    "DAYS_UNTIL_MATCHDAY": 11,
+    "DAYS_UNTIL_MATCHDAY": 11,   # Fallback, wird aus echten Spieldaten abgeleitet
     "OVERPAY_RISK_FACTOR": 0.60,
     "HISTORY_FILE": "history.json",
-    "MV_HISTORY_LENGTH": 5,
+    "MV_HISTORY_DAYS": 6,        # Anzahl gespeicherter TAGE (nicht Laeufe!)
     "MAX_PER_TEAM": 2,
     "OPPONENT_FETCH_SLEEP": 0.3,
-    "SEASON_YEAR": 2026,  # naechstes Jahr manuell auf 2027 aendern
-    "FIXTURE_LOOKAHEAD": 3
+    "SEASON_YEAR": 2026,
+    "FIXTURE_LOOKAHEAD": 3,
+    "TOP_DETAIL_COUNT": 10,      # so viele Spieler mit voller Detailansicht
+    "MIN_PROFIT_FOR_TOP": 300_000,  # ab welchem erwarteten Gewinn ein Spieler als Chance gilt
 }
 
 # ==========================================
 # VEREINS-ZUORDNUNG (fuer Restprogramm/Gegnerstaerke)
 # ==========================================
 # Kickbase-interne tid -> Team-Key. tid kommt als STRING aus der API.
-# Manuell verifiziert: 12 von 18 Vereinen. Offen: dortmund, schalke, hamburg,
-# augsburg, paderborn, elversberg - fuer deren Spieler gibt es bis auf Weiteres
-# kein Restprogramm (kein Absturz, das Feld bleibt einfach leer).
+# Alle 18 Vereine zugeordnet (aus Marktdaten-Abgleich verifiziert).
 KICKBASE_TID_TO_TEAM = {
     "2": "bayern",
     "3": "dortmund",
@@ -57,6 +58,29 @@ KICKBASE_TID_TO_TEAM = {
     "40": "union berlin",
     "43": "leipzig",
     "77": "elversberg",
+}
+
+# Kurze, lesbare Anzeigenamen (ersetzt das fehleranfaellige "letztes Wort"-Verfahren,
+# das aus "FC Schalke 04" ein "04" gemacht hat).
+TEAM_DISPLAY_NAMES = {
+    "bayern": "Bayern",
+    "dortmund": "Dortmund",
+    "leipzig": "Leipzig",
+    "stuttgart": "Stuttgart",
+    "hoffenheim": "Hoffenheim",
+    "leverkusen": "Leverkusen",
+    "freiburg": "Freiburg",
+    "frankfurt": "Frankfurt",
+    "augsburg": "Augsburg",
+    "mainz": "Mainz",
+    "union berlin": "Union",
+    "gladbach": "Gladbach",
+    "hamburg": "HSV",
+    "koeln": "Köln",
+    "werder": "Werder",
+    "paderborn": "Paderborn",
+    "schalke": "Schalke",
+    "elversberg": "Elversberg",
 }
 
 TEAM_STRENGTH_LAST_SEASON = {
@@ -81,6 +105,34 @@ TEAM_STRENGTH_LAST_SEASON = {
 }
 TEAM_STRENGTH_DEFAULT = 45
 BUNDESLIGA_TEAM_KEYS = list(TEAM_STRENGTH_LAST_SEASON.keys())
+
+
+# ==========================================
+# HILFSFUNKTIONEN: LESBARE ZAHLEN
+# ==========================================
+def fmt_money(value):
+    """Formatiert Betraege kompakt und lesbar: 12500000 -> '12,5 Mio'."""
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return "?"
+    sign = "-" if value < 0 else ""
+    v = abs(value)
+    if v >= 1_000_000:
+        return f"{sign}{v / 1_000_000:.1f}".replace(".", ",") + " Mio"
+    if v >= 1_000:
+        return f"{sign}{v / 1_000:.0f}k"
+    return f"{sign}{v}"
+
+
+def fmt_profit(value):
+    """Wie fmt_money, aber mit explizitem Plus-Zeichen fuer Gewinne."""
+    if value is None:
+        return "?"
+    if value > 0:
+        return "+" + fmt_money(value)
+    return fmt_money(value)
+
 
 # ==========================================
 # KNOTEN 1: KICKBASE LIVE API
@@ -109,7 +161,7 @@ def kickbase_login():
         league_id = data["lins"][0]["i"]
 
     if not token or not league_id:
-         raise ValueError("❌ Konnte Token oder Liga-ID nicht auslesen.")
+        raise ValueError("❌ Konnte Token oder Liga-ID nicht auslesen.")
 
     user_obj = data.get("u", {}) or {}
     my_user_id = user_obj.get("id") or user_obj.get("i")
@@ -119,12 +171,14 @@ def kickbase_login():
 
     return token, str(league_id), my_manager_id
 
+
 def _kb_headers(token):
     return {
         "Authorization": f"Bearer {token}",
         "User-Agent": "Kickbase/8.10.0 (Android)",
         "Accept": "application/json",
     }
+
 
 def get_market_players(token, league_id):
     """ Holt alle Transfermarkt-Spieler und umgeht die neuen Kickbase-Namen. """
@@ -147,6 +201,7 @@ def get_market_players(token, league_id):
     print(f"⚠️ DEBUG RAW MARKTDATEN: {json.dumps(data)[:800]}")
     return []
 
+
 def get_my_budget(token, league_id):
     """Liest den verfuegbaren Kontostand aus, mit Fallback von /me/budget auf /me."""
     for path in ["me/budget", "me"]:
@@ -165,6 +220,7 @@ def get_my_budget(token, league_id):
             print(f"⚠️ Budget ueber /{path} nicht ladbar: {e}")
     return None
 
+
 def get_ranking(token, league_id):
     try:
         resp = requests.get(
@@ -177,6 +233,7 @@ def get_ranking(token, league_id):
     except Exception as e:
         print(f"⚠️ Liga-Rangliste nicht ladbar, Gegner-Analyse wird uebersprungen: {e}")
         return {}
+
 
 def get_squad(token, league_id, manager_id):
     try:
@@ -191,6 +248,7 @@ def get_squad(token, league_id, manager_id):
         print(f"⚠️ Kader von Manager {manager_id} nicht ladbar: {e}")
         return []
 
+
 def count_players_by_team(squad_items):
     counts = {}
     for sp in squad_items:
@@ -199,6 +257,7 @@ def count_players_by_team(squad_items):
             continue
         counts[tid] = counts.get(tid, 0) + 1
     return counts
+
 
 def build_blocked_teams(token, league_id, ranking_res, my_manager_id):
     blocked = {}
@@ -215,11 +274,13 @@ def build_blocked_teams(token, league_id, ranking_res, my_manager_id):
         time.sleep(CONFIG["OPPONENT_FETCH_SLEEP"])
     return blocked
 
+
 def get_my_team_counts(token, league_id, my_manager_id):
     if not my_manager_id:
         return {}
     squad = get_squad(token, league_id, my_manager_id)
     return count_players_by_team(squad)
+
 
 # ==========================================
 # KNOTEN 2: LIGAINSIDER SCRAPING
@@ -239,7 +300,9 @@ def get_ligainsider_lineups():
                         starters.add(name.lower())
     except Exception as e:
         print(f"⚠️ LigaInsider Scraping-Hinweis: {e}")
+    print(f"ℹ️ LigaInsider Startelf-Namen geladen: {len(starters)}")
     return starters
+
 
 def get_ligainsider_injuries():
     url = "https://www.ligainsider.de/verletzungen-sperren/"
@@ -255,7 +318,9 @@ def get_ligainsider_injuries():
                     injured.add(text.lower())
     except Exception as e:
         print(f"⚠️ Verletzungs-Scraping-Hinweis: {e}")
+    print(f"ℹ️ LigaInsider Verletzten-Eintraege geladen: {len(injured)}")
     return injured
+
 
 # ==========================================
 # KNOTEN 3: RESTPROGRAMM / GEGNERSTAERKE (OpenLigaDB)
@@ -272,6 +337,7 @@ def get_season_fixtures():
         print(f"⚠️ OpenLigaDB-Spielplan konnte nicht geladen werden: {e}")
         return []
 
+
 def get_team_key(team_name):
     """Matched einen OpenLigaDB-Teamnamen auf einen der 18 festen Team-Keys."""
     if not team_name:
@@ -284,6 +350,31 @@ def get_team_key(team_name):
             return key
     return None
 
+
+def days_until_next_matchday(fixtures, fallback):
+    """Leitet die Tage bis zum naechsten Spiel aus echten Spieldaten ab,
+    statt eine feste Zahl im Code veralten zu lassen."""
+    if not fixtures:
+        return fallback
+    today = datetime.now(timezone.utc).date()
+    upcoming = []
+    for m in fixtures:
+        if m.get("matchIsFinished"):
+            continue
+        raw = m.get("matchDateTimeUTC")
+        if not raw:
+            continue
+        try:
+            d = datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+        except ValueError:
+            continue
+        if d >= today:
+            upcoming.append(d)
+    if not upcoming:
+        return fallback
+    return max(0, (min(upcoming) - today).days)
+
+
 def get_upcoming_opponents(fixtures, team_key, count):
     upcoming = []
     for m in fixtures:
@@ -294,11 +385,12 @@ def get_upcoming_opponents(fixtures, team_key, count):
         k1 = get_team_key(t1)
         k2 = get_team_key(t2)
         if k1 == team_key and k2:
-            upcoming.append((m.get("matchDateTimeUTC", ""), k2, t2))
+            upcoming.append((m.get("matchDateTimeUTC", ""), k2))
         elif k2 == team_key and k1:
-            upcoming.append((m.get("matchDateTimeUTC", ""), k1, t1))
+            upcoming.append((m.get("matchDateTimeUTC", ""), k1))
     upcoming.sort(key=lambda x: x[0])
     return upcoming[:count]
+
 
 def fixture_difficulty(fixtures, team_key):
     """Bewertet das Restprogramm anhand der Vorsaison-Staerke der naechsten Gegner."""
@@ -307,9 +399,9 @@ def fixture_difficulty(fixtures, team_key):
     opponents = get_upcoming_opponents(fixtures, team_key, CONFIG["FIXTURE_LOOKAHEAD"])
     if not opponents:
         return None
-    strengths = [TEAM_STRENGTH_LAST_SEASON.get(k, TEAM_STRENGTH_DEFAULT) for _, k, _ in opponents]
+    strengths = [TEAM_STRENGTH_LAST_SEASON.get(k, TEAM_STRENGTH_DEFAULT) for _, k in opponents]
     avg_strength = sum(strengths) / len(strengths)
-    opponent_names = [name.split()[-1] for _, _, name in opponents if name]
+    opponent_names = [TEAM_DISPLAY_NAMES.get(k, k.title()) for _, k in opponents]
     if avg_strength <= 35:
         label = "leicht"
     elif avg_strength <= 55:
@@ -317,6 +409,7 @@ def fixture_difficulty(fixtures, team_key):
     else:
         label = "schwer"
     return {"label": label, "opponents": opponent_names}
+
 
 # ==========================================
 # KNOTEN 4: HISTORY & PROGNOSE ENGINE
@@ -334,6 +427,7 @@ def load_history():
             data = resp.json()
             content = base64.b64decode(data["content"]).decode("utf-8")
             history = json.loads(content)
+            history.pop("players", None)  # Karteileiche aus alter Skript-Version
             print(f"✅ Verlauf aus GitHub geladen ({len(history)} Spieler bekannt).")
             return history, data.get("sha")
         except Exception as e:
@@ -344,7 +438,9 @@ def load_history():
     if os.path.exists(CONFIG["HISTORY_FILE"]):
         try:
             with open(CONFIG["HISTORY_FILE"], "r", encoding="utf-8") as f:
-                return json.load(f), None
+                h = json.load(f)
+                h.pop("players", None)
+                return h, None
         except Exception:
             return {}, None
     return {}, None
@@ -378,40 +474,67 @@ def save_history(history, sha=None):
     except Exception as e:
         print(f"⚠️ History Speicherung fehlgeschlagen: {e}")
 
-def calculate_real_daily_trend(player_id, current_mv, history):
+
+def calculate_real_daily_trend(player_id, current_mv, history, today_str=None):
+    """
+    Ermittelt die TAEGLICHE Marktwert-Veraenderung.
+
+    WICHTIG: Der Bot laeuft mehrmals taeglich, Kickbase aktualisiert die
+    Marktwerte aber nur einmal pro Tag. Deshalb wird pro KALENDERTAG nur ein
+    Messpunkt gespeichert (der jeweils aktuellste). Andernfalls entstuenden
+    kuenstliche Null-Deltas zwischen zwei Laeufen desselben Tages, die den
+    Median auf 0 druecken - genau das war der Grund fuer "+0 EUR" ueberall.
+
+    Rueckgabe: (daily_trend, has_real_data)
+    has_real_data=False bedeutet: noch zu wenig Tage gesammelt, der Wert ist
+    nur eine grobe Annahme und wird im Report auch so gekennzeichnet.
+    """
     player_id_str = str(player_id)
-    player_hist = history.get(player_id_str, {})
+    today_str = today_str or datetime.now(timezone.utc).date().isoformat()
+    entry = history.get(player_id_str, {})
 
-    mv_history = player_hist.get("mv_history")
-    if mv_history is None:
-        old_mv = player_hist.get("mv")
-        mv_history = [old_mv] if old_mv is not None and old_mv > 0 else []
+    # --- Migration aelterer Formate ---
+    days = entry.get("days")
+    if days is None:
+        days = []
+        legacy_list = entry.get("mv_history")
+        if isinstance(legacy_list, list) and legacy_list:
+            # Alte Werte ohne Datum: nur den letzten uebernehmen, da die
+            # Zuordnung zu Kalendertagen nicht mehr rekonstruierbar ist.
+            days = [{"d": "legacy", "mv": legacy_list[-1]}]
+        elif entry.get("mv"):
+            days = [{"d": "legacy", "mv": entry["mv"]}]
+
+    days = [d for d in days if isinstance(d, dict) and d.get("mv")]
+
+    # --- Heutigen Messpunkt setzen bzw. aktualisieren ---
+    if days and days[-1].get("d") == today_str:
+        days[-1]["mv"] = current_mv
     else:
-        mv_history = list(mv_history)
+        days.append({"d": today_str, "mv": current_mv})
+    days = days[-CONFIG["MV_HISTORY_DAYS"]:]
+    history[player_id_str] = {"days": days}
 
-    if len(mv_history) >= 2:
-        deltas = sorted(mv_history[i] - mv_history[i - 1] for i in range(1, len(mv_history)))
-        daily_trend = deltas[len(deltas) // 2]
-    elif len(mv_history) == 1:
-        daily_trend = current_mv - mv_history[-1]
-    else:
-        daily_trend = 150000 if current_mv > 5000000 else 50000
+    # --- Trend aus echten Tages-Deltas ---
+    mvs = [d["mv"] for d in days]
+    if len(mvs) >= 3:
+        deltas = sorted(mvs[i] - mvs[i - 1] for i in range(1, len(mvs)))
+        return deltas[len(deltas) // 2], True      # Median mehrerer Tage
+    if len(mvs) == 2:
+        return mvs[1] - mvs[0], True               # ein echtes Tages-Delta
+    # Noch kein Vergleichstag vorhanden -> grobe Annahme
+    return (150000 if current_mv > 5_000_000 else 50000), False
 
-    mv_history.append(current_mv)
-    mv_history = mv_history[-CONFIG["MV_HISTORY_LENGTH"]:]
 
-    history[player_id_str] = {"mv_history": mv_history}
-    return daily_trend
-
-def predict_mv_and_overpay(current_mv, daily_trend):
-    if daily_trend <= 0:
+def predict_mv_and_overpay(current_mv, daily_trend, days_left):
+    if daily_trend <= 0 or days_left <= 0:
         return current_mv, int(current_mv * 1.02), 0
 
     damping = 0.96
     projected_growth = 0
     current_daily = daily_trend
 
-    for _ in range(CONFIG["DAYS_UNTIL_MATCHDAY"]):
+    for _ in range(days_left):
         projected_growth += current_daily
         current_daily *= damping
 
@@ -419,7 +542,10 @@ def predict_mv_and_overpay(current_mv, daily_trend):
     max_bid = current_mv + int(projected_growth * CONFIG["OVERPAY_RISK_FACTOR"])
     return projected_mv, max_bid, int(projected_growth)
 
-def evaluate_player(player, history, starters, injured_list, my_team_counts=None, blocked_teams=None, my_budget=None, fixture_info=None):
+
+def evaluate_player(player, history, starters, injured_list, days_left,
+                    my_team_counts=None, blocked_teams=None, my_budget=None,
+                    fixture_info=None, today_str=None):
     player_id = player.get("id", player.get("i"))
     tid = player.get("tid")
 
@@ -431,8 +557,8 @@ def evaluate_player(player, history, starters, injured_list, my_team_counts=None
 
     mv = int(player.get("mv", player.get("m", 0)))
 
-    daily_trend = calculate_real_daily_trend(player_id, mv, history)
-    proj_mv, max_bid, raw_profit = predict_mv_and_overpay(mv, daily_trend)
+    daily_trend, has_real_data = calculate_real_daily_trend(player_id, mv, history, today_str)
+    proj_mv, max_bid, raw_profit = predict_mv_and_overpay(mv, daily_trend, days_left)
 
     name_lower = name.lower()
     is_starter = any(s in name_lower or name_lower in s for s in starters)
@@ -444,17 +570,25 @@ def evaluate_player(player, history, starters, injured_list, my_team_counts=None
     opponents_with_team_blocked = blocked_teams.get(tid, []) if tid is not None else []
     budget_exceeded = my_budget is not None and max_bid > my_budget
 
-    recommendation = "ABWARTEN"
-    if raw_profit > 1_500_000 and not is_injured:
-        recommendation = "KAUF JETZT (High Profit)"
-    elif daily_trend > 0:
-        recommendation = "BEOBACHTEN"
-    if is_injured:
-        recommendation = "RISIKO (Verletzt/Angeschlagen)"
+    # --- Kategorie bestimmen (steuert die Gruppierung im Report) ---
     if violates_my_limit:
-        recommendation = "BLOCKIERT (2-Spieler-Regel)"
+        category = "blocked"
+        reason = "2-Spieler-Regel: du hast schon 2 aus diesem Verein"
+    elif is_injured:
+        category = "blocked"
+        reason = "verletzt / angeschlagen"
     elif budget_exceeded:
-        recommendation = f"{recommendation} - Budget reicht nicht"
+        category = "blocked"
+        reason = f"Gebot {fmt_money(max_bid)} über deinem Budget"
+    elif raw_profit >= 1_500_000:
+        category = "top"
+        reason = "hoher erwarteter Marktwert-Gewinn"
+    elif raw_profit >= CONFIG["MIN_PROFIT_FOR_TOP"]:
+        category = "watch"
+        reason = "solider Aufwärtstrend"
+    else:
+        category = "skip"
+        reason = "kein nennenswerter Trend"
 
     return {
         "id": player_id,
@@ -463,18 +597,87 @@ def evaluate_player(player, history, starters, injured_list, my_team_counts=None
         "proj_mv": proj_mv,
         "max_bid": max_bid,
         "exp_profit": raw_profit,
+        "daily_trend": daily_trend,
+        "has_real_data": has_real_data,
         "is_starter": is_starter,
         "is_injured": is_injured,
         "violates_my_limit": violates_my_limit,
         "opponents_with_team_blocked": opponents_with_team_blocked,
         "budget_exceeded": budget_exceeded,
-        "recommendation": recommendation,
+        "category": category,
+        "reason": reason,
         "fixture_difficulty": fixture_info["label"] if fixture_info else None,
         "fixture_opponents": fixture_info["opponents"] if fixture_info else []
     }
 
+
 # ==========================================
-# KNOTEN 5: TELEGRAM DISPATCHER & SPLITTER
+# KNOTEN 5: REPORT-AUFBAU
+# ==========================================
+def build_report(evaluated, my_budget, days_left, any_real_data):
+    lines = []
+    lines.append(f"⚽ <b>Kickbase Markt-Report</b> — noch {days_left} Tage bis zum nächsten Spiel")
+    if my_budget is not None:
+        lines.append(f"💳 Budget: <b>{fmt_money(my_budget)} €</b>")
+
+    if not any_real_data:
+        lines.append(
+            "\n⚠️ <i>Noch keine echten Tages-Trends vorhanden — die Prognosen unten "
+            "sind grobe Startwerte. Ab morgen rechnet der Bot mit echten Marktwert-Änderungen.</i>"
+        )
+
+    tops = sorted([p for p in evaluated if p["category"] == "top"],
+                  key=lambda x: x["exp_profit"], reverse=True)
+    watch = sorted([p for p in evaluated if p["category"] == "watch"],
+                   key=lambda x: x["exp_profit"], reverse=True)
+    blocked = [p for p in evaluated if p["category"] == "blocked"]
+    skipped = [p for p in evaluated if p["category"] == "skip"]
+
+    # ---- Detailblock: beste Chancen zuerst ----
+    detail = (tops + watch)[:CONFIG["TOP_DETAIL_COUNT"]]
+    if detail:
+        lines.append("\n🔥 <b>BESTE CHANCEN</b> (nach erwartetem Gewinn)")
+        for i, p in enumerate(detail, start=1):
+            trend_note = "" if p["has_real_data"] else " <i>(geschätzt)</i>"
+            lines.append(
+                f"\n<b>{i}. {p['name']}</b> — {fmt_money(p['mv'])} €{trend_note}\n"
+                f"   Erwartet zum Spieltag: {fmt_money(p['proj_mv'])} € "
+                f"(<b>{fmt_profit(p['exp_profit'])} €</b>)\n"
+                f"   👉 Bieten bis max. <b>{fmt_money(p['max_bid'])} €</b>"
+            )
+            extras = []
+            extras.append("✅ Startelf" if p["is_starter"] else "❓ Rotation")
+            if p["fixture_difficulty"]:
+                opps = ", ".join(p["fixture_opponents"])
+                extras.append(f"📅 Restprogramm {p['fixture_difficulty']} ({opps})")
+            if p["opponents_with_team_blocked"]:
+                extras.append(f"🔓 Verein bei {len(p['opponents_with_team_blocked'])} Gegner(n) voll")
+            lines.append("   " + " · ".join(extras))
+    else:
+        lines.append("\n😐 <b>Aktuell keine lohnenden Kaufchancen auf dem Markt.</b>")
+
+    # ---- Kurzliste: weitere Beobachtungen ----
+    rest_watch = (tops + watch)[CONFIG["TOP_DETAIL_COUNT"]:]
+    if rest_watch:
+        lines.append("\n👀 <b>Weitere Beobachtungen</b>")
+        for p in rest_watch:
+            lines.append(f"• {p['name']} — {fmt_money(p['mv'])} € ({fmt_profit(p['exp_profit'])} €)")
+
+    # ---- Nicht bieten ----
+    if blocked:
+        lines.append("\n🚫 <b>Nicht bieten</b>")
+        for p in blocked:
+            lines.append(f"• {p['name']} — {p['reason']}")
+
+    # ---- Rest nur als Zahl ----
+    if skipped:
+        lines.append(f"\nℹ️ {len(skipped)} weitere Spieler ohne nennenswerten Trend ausgeblendet.")
+
+    return "\n".join(lines)
+
+
+# ==========================================
+# KNOTEN 6: TELEGRAM DISPATCHER & SPLITTER
 # ==========================================
 def split_telegram_message(message, max_len):
     chunks = []
@@ -500,6 +703,7 @@ def split_telegram_message(message, max_len):
     if current:
         chunks.append(current)
     return [chunk for chunk in chunks if chunk.strip()]
+
 
 def send_telegram_messages(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -540,6 +744,7 @@ def send_telegram_messages(message):
         fallback.raise_for_status()
         time.sleep(0.25)
 
+
 # ==========================================
 # HAUPTABLAUF (PIPELINE EXECUTION)
 # ==========================================
@@ -556,7 +761,7 @@ def main():
 
     my_budget = get_my_budget(token, league_id)
     if my_budget is not None:
-        print(f"💳 Verfuegbares Budget: {my_budget:,}".replace(",", ".") + " €")
+        print(f"💳 Verfuegbares Budget: {fmt_money(my_budget)} €")
     else:
         print("⚠️ Budget konnte nicht ermittelt werden - Budget-Warnungen sind deaktiviert.")
 
@@ -565,64 +770,39 @@ def main():
     blocked_teams = build_blocked_teams(token, league_id, ranking_res, my_manager_id)
 
     season_fixtures = get_season_fixtures()
+    days_left = days_until_next_matchday(season_fixtures, CONFIG["DAYS_UNTIL_MATCHDAY"])
+    print(f"📅 Tage bis zum naechsten Spiel: {days_left}")
+
     fixture_cache = {}
     unmapped_tids_seen = set()
+    today_str = datetime.now(timezone.utc).date().isoformat()
 
-    evaluated_list = []
-    report_lines = [f"⚽ <b>Kickbase Markt-Report ({CONFIG['DAYS_UNTIL_MATCHDAY']} Tage bis Spieltag 1)</b>\n"]
-    if my_budget is not None:
-        budget_str = f"{my_budget:,}".replace(",", ".")
-        report_lines.append(f"💳 <b>Verfuegbares Budget:</b> {budget_str} €\n")
-
+    evaluated = []
     for p in raw_players:
         tid_str = str(p.get("tid")) if p.get("tid") else None
         team_key = KICKBASE_TID_TO_TEAM.get(tid_str) if tid_str else None
         if tid_str and not team_key and tid_str not in unmapped_tids_seen:
-            print(f"ℹ️ Team-ID {tid_str} noch nicht zugeordnet (Spieler: {p.get('n')}) - kein Restprogramm fuer diesen Verein.")
+            print(f"ℹ️ Team-ID {tid_str} noch nicht zugeordnet (Spieler: {p.get('n')}) - kein Restprogramm.")
             unmapped_tids_seen.add(tid_str)
 
         if team_key and team_key not in fixture_cache:
             fixture_cache[team_key] = fixture_difficulty(season_fixtures, team_key)
         fixture_info = fixture_cache.get(team_key) if team_key else None
 
-        res = evaluate_player(p, history, starters, injured, my_team_counts, blocked_teams, my_budget, fixture_info)
-        evaluated_list.append(res)
+        evaluated.append(evaluate_player(
+            p, history, starters, injured, days_left,
+            my_team_counts, blocked_teams, my_budget, fixture_info, today_str
+        ))
 
-        profit_formatted = f"+{res['exp_profit']:,}".replace(",", ".")
-        mv_formatted = f"{res['mv']:,}".replace(",", ".")
-        proj_formatted = f"{res['proj_mv']:,}".replace(",", ".")
-        bid_formatted = f"{res['max_bid']:,}".replace(",", ".")
-
-        status_icons = "✅ S11" if res["is_starter"] else "❓ Rotation"
-        if res["is_injured"]:
-            status_icons += " | 🚑 Verletzt"
-
-        extra_lines = ""
-        if res["fixture_difficulty"]:
-            opp_str = ", ".join(res["fixture_opponents"]) if res["fixture_opponents"] else "?"
-            extra_lines += f"  📅 Restprogramm: {res['fixture_difficulty'].capitalize()} (naechste Gegner: {opp_str})\n"
-        if res["violates_my_limit"]:
-            extra_lines += "  🚫 Ueberschreitet deine 2-Spieler-Regel\n"
-        if res["opponents_with_team_blocked"]:
-            names = ", ".join(res["opponents_with_team_blocked"])
-            extra_lines += f"  ℹ️ Verein bei Gegnern schon voll: {names}\n"
-        if res["budget_exceeded"]:
-            extra_lines += "  🚫 Max. Gebot uebersteigt dein Budget\n"
-
-        report_lines.append(
-            f"• <b>{res['name']}</b> | MW: {mv_formatted} €\n"
-            f"  📈 Proj. MW (MD1): {proj_formatted} € ({profit_formatted} €)\n"
-            f"  🎯 Max. Gebot: <b>{bid_formatted} €</b> ({status_icons})\n"
-            f"  💡 Empfehlung: <b>{res['recommendation']}</b>\n"
-            f"{extra_lines}"
-        )
+    any_real_data = any(p["has_real_data"] for p in evaluated)
+    print(f"📈 Spieler mit echten Tages-Trenddaten: {sum(1 for p in evaluated if p['has_real_data'])}/{len(evaluated)}")
 
     save_history(history, history_sha)
 
-    full_report = "\n".join(report_lines)
-
-    send_telegram_messages(full_report)
+    report = build_report(evaluated, my_budget, days_left, any_real_data)
+    send_telegram_messages(report)
     print("✅ Pipeline-Durchlauf vollkommen erfolgreich beendet!")
+
 
 if __name__ == "__main__":
     main()
