@@ -268,6 +268,70 @@ def get_squad(token, league_id, manager_id):
     except Exception:
         return []
 
+def get_player_detail(token, league_id, player_id):
+    """
+    Holt Spieler-Detaildaten (Punkteschnitt, historischer Marktwert-Verlauf,
+    Statuscode fuer Startelf-Prognose) direkt von der Kickbase-API.
+    Gibt None zurueck wenn nicht verfuegbar (kein Absturz).
+    """
+    for path in [
+        f"leagues/{league_id}/players/{player_id}",
+        f"players/{player_id}",
+    ]:
+        try:
+            resp = requests.get(f"https://api.kickbase.com/v4/{path}",
+                                headers=_kb(token), timeout=CONFIG["REQUEST_TIMEOUT"])
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+    return None
+
+def extract_player_stats(detail):
+    """
+    Liest aus der Detailantwort:
+    - avg_points: Punkte-Schnitt letzte Saison
+    - mv_history: historischer Marktwert-Verlauf (Liste von Werten, aelteste zuerst)
+    - status_code: Kickbase-Startelf-Symbol (0=garantiert, 1=sicher, 2=unsicher,
+                   3=unwahrscheinlich, 4=bank - aus App-Beobachtung, unverifiziert)
+    Gibt Dict mit None-Werten zurueck wenn Felder nicht gefunden werden.
+    """
+    if not detail:
+        return {"avg_points": None, "mv_history_api": None, "status_code": None}
+
+    # Punkte-Schnitt: verschiedene moegliche Feldnamen
+    avg = None
+    for k in ["ap", "avgPoints", "averagePoints", "avp", "sap"]:
+        v = detail.get(k)
+        if isinstance(v, (int, float)) and v > 0:
+            avg = round(float(v), 1)
+            break
+
+    # Historischer Marktwert-Verlauf
+    mv_hist = None
+    for k in ["mvHistory", "mvh", "marketValues", "mvl"]:
+        v = detail.get(k)
+        if isinstance(v, list) and v:
+            # Kickbase liefert oft Dicts mit "m" (Wert) und "d" (Datum)
+            if isinstance(v[0], dict):
+                vals = [x.get("m") or x.get("v") or x.get("value") for x in v]
+                vals = [x for x in vals if isinstance(x, (int, float)) and x > 0]
+            else:
+                vals = [x for x in v if isinstance(x, (int, float)) and x > 0]
+            if vals:
+                mv_hist = vals
+            break
+
+    # Status-Code fuer Startelf-Prognose
+    status = None
+    for k in ["st", "status", "fit", "fitnessStatus"]:
+        v = detail.get(k)
+        if isinstance(v, int):
+            status = v
+            break
+
+    return {"avg_points": avg, "mv_history_api": mv_hist, "status_code": status}
+
 def count_by_team(items):
     c = {}
     for x in items:
@@ -729,38 +793,90 @@ def predict(current_mv, daily_trend, days_left, overpay_factor):
 # ==========================================
 # KNOTEN 6: SPIELER-BEWERTUNG
 # ==========================================
+
+# Kickbase Statuscode -> Startelf-Symbol (aus App-Screenshot verifiziert)
+STATUS_ICONS = {
+    0: "🔵",   # garantiert
+    1: "🟢",   # sicher
+    2: "🟡",   # unsicher / Rotation
+    3: "🟠",   # unwahrscheinlich
+    4: "🔴",   # wahrscheinlich nicht
+}
+STATUS_LABELS = {
+    0: "garantiert", 1: "sicher", 2: "Rotation",
+    3: "unwahrscheinlich", 4: "bank/keine Chance",
+}
+STATUS_FACTORS = {
+    0: 1.15,   # garantiert Startelf -> deutlicher Boost
+    1: 1.10,   # sicher
+    2: 1.00,   # Rotation -> neutral
+    3: 0.90,   # unwahrscheinlich -> Abschlag
+    4: 0.75,   # bank -> starker Abschlag
+}
+
+def lineup_factor_from_status(status_code):
+    return STATUS_FACTORS.get(status_code, 1.0)
+
+
+def score_relative_value(mv, avg_points, pos_code):
+    """
+    Relatives Bewertungsmodell: Ist der Spieler guenstig fuer seine Leistung?
+    Formel: Erwarteter Marktwert = avg_points * positions_multiplikator * basiswert
+    Positiver Score = Spieler ist UNTER dem erwarteten Wert -> Kaufgelegenheit.
+    Negativer Score = Spieler ist UEBER dem erwarteten Wert.
+    Rueckgabe: float (positive = guenstig, negative = teuer) oder None
+    """
+    if not avg_points or avg_points <= 0 or not mv or mv <= 0:
+        return None
+    # Grobe Basiswerte aus Marktbeobachtung (wird mit echten Daten kalibriert)
+    # Stuermer haben hoehere Multiplikatoren als Torhüter
+    pos_mult = {1: 80_000, 2: 100_000, 3: 120_000, 4: 150_000}.get(pos_code, 100_000)
+    expected_mv = avg_points * pos_mult
+    return (expected_mv - mv) / max(mv, 1_000_000)  # normiert auf Marktwert
+
+
 def evaluate_player(player, history, injured_list, headlines, days_left,
                     my_team_counts=None, blocked_teams=None, my_budget=None,
-                    fixture_info=None, win_prob=None, today_str=None):
+                    fixture_info=None, win_prob=None, today_str=None,
+                    detail=None):
+    """
+    detail: Ergebnis von get_player_detail() + extract_player_stats() -
+    optional, wird wenn verfuegbar fuer bessere Prognosen genutzt.
+    """
     pid = player.get("id", player.get("i"))
     tid = player.get("tid")
+    pos_code = None
+    try:
+        pos_code = int(player.get("pos", player.get("p", 0))) or None
+    except (TypeError, ValueError):
+        pass
     name = player.get("n", player.get("lastName", ""))
     if not name and "fn" in player and "ln" in player:
         name = f"{player['fn']} {player['ln']}"
     if not name:
         name = "Unbekannt"
     mv = int(player.get("mv", player.get("m", 0)))
-    exs = int(player.get("exs", 0))   # Restlaufzeit der Auktion in Sekunden
+    exs = int(player.get("exs", 0))
+
+    # Spielerdetails (Punkteschnitt, historischer Verlauf, Statuscode)
+    stats = extract_player_stats(detail) if detail else {"avg_points": None, "mv_history_api": None, "status_code": None}
+    avg_points = stats["avg_points"]
+    status_code = stats["status_code"]
+
+    # Relatives Bewertungs-Signal
+    relative_value = score_relative_value(mv, avg_points, pos_code)
 
     deltas, has_real = update_history(pid, mv, history, today_str)
     daily_trend, _ = compute_trend(deltas)
     momentum = compute_momentum(deltas) if has_real else "neutral"
 
-    # Overpay-Faktor = Basis × Quoten × Momentum × Startelf-Wahrscheinlichkeit
+    # Overpay-Faktor = Basis × Quoten × Momentum × Startelf-Status
     mf = matchup_factor(win_prob)
     mf_momentum = (CONFIG["MOMENTUM_BOOST"] if momentum == "beschleunigt"
                    else CONFIG["MOMENTUM_BRAKE"] if momentum == "verlangsamt"
                    else 1.0)
-    overpay_factor = CONFIG["OVERPAY_BASE_FACTOR"] * mf * mf_momentum
-
-    # Kickbase Premium-Feld 'prob': Startelf-Wahrscheinlichkeit (verifiziert in Feldliste)
-    # Muss VOR predict() angewendet werden, damit es in max_bid einfließt.
-    lineup_prob = get_lineup_prob(player)
-    if lineup_prob is not None:
-        if lineup_prob >= 0.7:
-            overpay_factor *= 1.10   # Boost: Punkte wahrscheinlicher
-        elif lineup_prob < 0.3:
-            overpay_factor *= 0.85   # Abschlag: ohne Einsatz kein Marktwert-Anstieg
+    mf_lineup = lineup_factor_from_status(status_code)
+    overpay_factor = CONFIG["OVERPAY_BASE_FACTOR"] * mf * mf_momentum * mf_lineup
 
     proj_mv, max_bid, raw_profit = predict(mv, daily_trend, days_left, overpay_factor)
 
@@ -776,9 +892,10 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     urgency_minutes = exs // 60 if exs > 0 else None
     is_urgent = urgency_minutes is not None and urgency_minutes <= CONFIG["URGENCY_THRESHOLD_MINUTES"]
 
-    # Reihenfolge wichtig: harte Blocker zuerst, DANN "kein Trend" (pending),
-    # erst danach Budget/Kaufkategorien. So landet ein Spieler ohne Tagesvergleich
-    # (max_bid == None) in "pending" und nicht faelschlich in "Budget zu teuer".
+    # Unterbewertet-Bonus: wenn relatives Modell zeigt dass Spieler viel zu guenstig ist
+    # -> auch ohne hohen Tages-Trend als "watch" einstufen
+    is_undervalued = relative_value is not None and relative_value > 0.25
+
     if violates:
         category, reason = "blocked", "2-Spieler-Regel: du hast schon 2 aus diesem Verein"
     elif is_injured:
@@ -786,13 +903,19 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     elif negative:
         category, reason = "blocked", "negative Schlagzeile — erst prüfen"
     elif not has_real or max_bid is None:
-        category, reason = "pending", "noch kein Tagesvergleich — morgen entscheiden"
+        # Unterbewertet-Spieler trotzdem als watch markieren, auch ohne Trendvergleich
+        if is_undervalued:
+            category = "watch"
+            reason = f"strukturell unterbewertet (Ø {avg_points} Pkt, aber kein Trendvergleich noch)"
+        else:
+            category, reason = "pending", "noch kein Tagesvergleich — morgen entscheiden"
     elif my_budget is not None and max_bid > my_budget:
         category, reason = "blocked", f"Gebot {fmt_money(max_bid)} über Budget"
     elif raw_profit >= 1_500_000:
         category, reason = "top", "hoher erwarteter Gewinn"
-    elif raw_profit >= CONFIG["MIN_PROFIT_FOR_TOP"]:
-        category, reason = "watch", "solider Aufwärtstrend"
+    elif raw_profit >= CONFIG["MIN_PROFIT_FOR_TOP"] or is_undervalued:
+        category = "watch"
+        reason = "strukturell unterbewertet" if is_undervalued else "solider Aufwärtstrend"
     else:
         category, reason = "skip", "kein nennenswerter Trend"
 
@@ -807,7 +930,8 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
         "opp_blocked": opp_blocked, "budget_ok": budget_ok,
         "category": category, "reason": reason,
         "fixture": fixture_info, "win_prob": win_prob,
-        "lineup_prob": lineup_prob,
+        "avg_points": avg_points, "status_code": status_code,
+        "relative_value": relative_value, "is_undervalued": is_undervalued,
         "overpay_factor": overpay_factor,
         "urgency_minutes": urgency_minutes, "is_urgent": is_urgent,
         "exs": exs,
@@ -860,14 +984,17 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                 f"   👉 Max. Gebot: <b>{fmt_money(p['max_bid'])} €</b>"
             )
             extras = []
-            if p.get("lineup_prob") is not None:
-                lp = p["lineup_prob"]
-                if lp >= 0.7:
-                    extras.append(f"🟢 Startelf {lp*100:.0f}%")
-                elif lp < 0.3:
-                    extras.append(f"🔴 Bank {lp*100:.0f}%")
-                else:
-                    extras.append(f"🟡 Rotation {lp*100:.0f}%")
+            # Startelf-Status aus Kickbase direkt (verifizierte Symbole)
+            sc = p.get("status_code")
+            if sc is not None and sc in STATUS_ICONS:
+                extras.append(f"{STATUS_ICONS[sc]} {STATUS_LABELS[sc]}")
+            # Punkte-Schnitt letzte Saison
+            if p.get("avg_points"):
+                extras.append(f"📊 Ø {p['avg_points']} Pkt")
+            # Relatives Bewertungs-Signal
+            if p.get("is_undervalued"):
+                rv = p.get("relative_value", 0)
+                extras.append(f"💎 unterbewertet ({rv*100:.0f}% unter erwartetem MW)")
             if p["fixture"]:
                 opps = ", ".join(p["fixture"]["opponents"])
                 extras.append(f"📅 {p['fixture']['label']} ({opps})")
@@ -1015,10 +1142,8 @@ def main():
     fixture_cache, unmapped = {}, set()
     today_str = datetime.now(timezone.utc).date().isoformat()
     evaluated = []
+    detail_debug_done = False
 
-    # Alle Spieler am Markt evaluieren (History-Tracking fuer alle - auch fuer
-    # spaeteres ML-Training mit angebotenen Spielern). Im Report erscheinen
-    # aber nur freie Spieler - angebotene bekommen Kategorie "market_offer".
     for p in all_market:
         tid_str = str(p.get("tid")) if p.get("tid") else None
         team_key = KICKBASE_TID_TO_TEAM.get(tid_str) if tid_str else None
@@ -1030,13 +1155,23 @@ def main():
         fixture_info = fixture_cache.get(team_key) if team_key else None
         win_prob = win_probs.get(team_key) if team_key else None
 
+        # Detail-Abruf nur fuer freie Spieler (spart API-Calls fuer die 48 angebotenen)
+        detail = None
+        if is_free_market_player(p):
+            pid_str = p.get("id", p.get("i"))
+            if pid_str:
+                detail = get_player_detail(token, league_id, pid_str)
+                if detail and not detail_debug_done:
+                    detail_debug_done = True
+                    print("🔬 DETAIL-ROHSTRUKTUR (einmalig zur Feldnamen-Pruefung):")
+                    print(json.dumps(detail, ensure_ascii=False)[:1200])
+                time.sleep(0.2)
+
         res = evaluate_player(
             p, history, injured, headlines, days_left,
             my_team_counts, blocked_teams, my_budget,
-            fixture_info, win_prob, today_str)
+            fixture_info, win_prob, today_str, detail=detail)
 
-        # Angebotene Spieler: History wurde bereits aktualisiert (ML-Tracking),
-        # aber Kategorie auf "market_offer" setzen -> im Report unsichtbar
         if not is_free_market_player(p):
             seller = get_seller_name(p) or "?"
             res["category"] = "market_offer"
