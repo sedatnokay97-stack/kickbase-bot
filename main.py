@@ -33,7 +33,7 @@ CONFIG = {
     "SEASON_YEAR": 2026,
     "FIXTURE_LOOKAHEAD": 3,
     "TOP_DETAIL_COUNT": 10,
-    "MIN_PROFIT_FOR_TOP": 300_000,
+    "MIN_PROFIT_FOR_TOP": 500_000,
     "NEWS_MAX_PER_PLAYER": 2,
     "FEED_DEBUG_DUMP": False,
     # Urgency: Auktionen mit weniger als X Minuten Restlaufzeit kommen ganz oben
