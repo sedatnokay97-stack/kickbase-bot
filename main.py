@@ -205,6 +205,41 @@ def get_ranking(token, league_id):
         return {}
 
 
+def extract_league_users(ranking_res):
+    """
+    Findet die Teilnehmerliste in der Ranglisten-Antwort.
+    Kickbase hat den Schluessel schon mehrfach geaendert ("users", "us", "it"...),
+    deshalb Smart-Scan wie beim Transfermarkt statt fester Annahme.
+    Rueckgabe: Liste von (manager_id, name).
+    """
+    if not isinstance(ranking_res, dict):
+        return []
+
+    candidates = []
+    for key, value in ranking_res.items():
+        if isinstance(value, list) and value and isinstance(value[0], dict):
+            candidates.append((key, value))
+
+    id_keys = ["mid", "id", "i", "u", "uid"]
+    name_keys = ["name", "n", "unm", "userName"]
+
+    for key, items in candidates:
+        users = []
+        for item in items:
+            uid = next((item[k] for k in id_keys if item.get(k)), None)
+            uname = next((item[k] for k in name_keys
+                          if isinstance(item.get(k), str) and item[k].strip()), None)
+            if uid:
+                users.append((str(uid), uname or "?"))
+        if users:
+            print(f"🔍 Liga-Teilnehmer gefunden im Ordner '{key}': {len(users)}")
+            return users
+
+    print("⚠️ Keine Teilnehmerliste in der Rangliste erkannt.")
+    print(f"🔬 RANGLISTE-ROHSTRUKTUR: {json.dumps(ranking_res, ensure_ascii=False)[:900]}")
+    return []
+
+
 def get_squad(token, league_id, manager_id):
     try:
         resp = requests.get(
@@ -257,13 +292,13 @@ def analyze_opponents(token, league_id, ranking_res, my_manager_id):
     """
     blocked = {}
     profiles = []
-    users = ranking_res.get("users", []) if ranking_res else []
-    for user in users:
-        opponent_id = user.get("mid") or user.get("id")
-        if not opponent_id or opponent_id == my_manager_id:
+    users = extract_league_users(ranking_res)
+    for opponent_id, name in users:
+        if not opponent_id or str(opponent_id) == str(my_manager_id):
             continue
-        name = user.get("name", "?")
         squad = get_squad(token, league_id, opponent_id)
+        if not squad:
+            continue
 
         for tid, count in count_players_by_team(squad).items():
             if count >= CONFIG["MAX_PER_TEAM"]:
@@ -321,28 +356,33 @@ def get_league_feed(token, league_id):
 
 def parse_feed_transfers(feed_items):
     """
-    Versucht, aus dem Feed abgeschlossene Transfers zu lesen.
-    UNGEPRUEFT: Die Feldnamen sind Kandidaten, da das Feed-Schema nicht
-    dokumentiert ist. Liefert nur, was eindeutig erkennbar ist - im Zweifel
-    lieber nichts als falsche Zahlen.
+    Liest abgeschlossene Transfers aus dem Feed.
+    Schema anhand echter Live-Daten verifiziert (Stand: dieser Lauf):
+        data.byr = Kaeufer-Name, data.pn = Spielername, data.trp = Preis
+    Die uebrigen Schluessel bleiben als Fallback stehen, falls Kickbase
+    die Bezeichnungen erneut aendert.
     """
     transfers = []
-    name_keys = ["buyerName", "bn", "userName", "un", "managerName", "name", "n"]
-    player_keys = ["playerName", "pn", "playerFirstName", "pfn", "lastName"]
-    price_keys = ["price", "p", "trp", "value", "mv"]
+    name_keys = ["byr", "buyerName", "bn", "userName", "un", "managerName"]
+    seller_keys = ["slr", "sen", "sellerName"]
+    player_keys = ["pn", "playerName", "playerFirstName", "pfn", "lastName"]
+    price_keys = ["trp", "price", "value"]
 
     for item in feed_items:
         if not isinstance(item, dict):
             continue
         flat = dict(item)
-        # verschachtelte Daten (haeufig unter "data"/"d"/"meta") mitnehmen
         for nest_key in ["data", "d", "meta", "m"]:
             nested = item.get(nest_key)
             if isinstance(nested, dict):
                 flat.update(nested)
 
-        buyer = next((flat[k] for k in name_keys if isinstance(flat.get(k), str) and flat[k].strip()), None)
-        player = next((flat[k] for k in player_keys if isinstance(flat.get(k), str) and flat[k].strip()), None)
+        buyer = next((flat[k].strip() for k in name_keys
+                      if isinstance(flat.get(k), str) and flat[k].strip()), None)
+        seller = next((flat[k].strip() for k in seller_keys
+                       if isinstance(flat.get(k), str) and flat[k].strip()), None)
+        player = next((flat[k].strip() for k in player_keys
+                       if isinstance(flat.get(k), str) and flat[k].strip()), None)
         price = None
         for k in price_keys:
             v = flat.get(k)
@@ -351,7 +391,9 @@ def parse_feed_transfers(feed_items):
                 break
 
         if buyer and player and price:
-            transfers.append({"buyer": buyer, "player": player, "price": price})
+            transfers.append({"buyer": buyer, "seller": seller,
+                              "player": player, "price": price,
+                              "date": item.get("dt")})
     return transfers
 
 
@@ -401,8 +443,9 @@ def get_rss_headlines():
     return unique
 
 
-def _scrape_first_working(urls, extractor, label):
+def _scrape_first_working(urls, extractor, label, diagnose=False):
     """Probiert mehrere URLs durch und nimmt die erste, die Daten liefert."""
+    last_soup = None
     for url in urls:
         try:
             resp = requests.get(url, headers=BROWSER_HEADERS, timeout=CONFIG["REQUEST_TIMEOUT"])
@@ -410,14 +453,27 @@ def _scrape_first_working(urls, extractor, label):
                 print(f"⚠️ {label}: HTTP {resp.status_code} bei {url}")
                 continue
             resp.encoding = "utf-8"
-            result = extractor(BeautifulSoup(resp.text, "html.parser"))
+            soup = BeautifulSoup(resp.text, "html.parser")
+            last_soup = soup
+            result = extractor(soup)
             if result:
                 print(f"✅ {label}: {len(result)} Eintraege von {url}")
                 return result
             print(f"⚠️ {label}: 0 Eintraege bei {url}")
         except Exception as e:
             print(f"⚠️ {label}: Fehler bei {url}: {e}")
+
     print(f"❌ {label}: keine der bekannten URLs lieferte Daten - Feature bleibt inaktiv.")
+    if diagnose and last_soup is not None:
+        # Zeigt, welche Link-Muster die Seite tatsaechlich hat, damit der
+        # richtige Selektor beim naechsten Mal ohne Raten gefunden werden kann.
+        hrefs = [a["href"] for a in last_soup.find_all("a", href=True)]
+        print(f"🔬 {label} DIAGNOSE: {len(hrefs)} Links auf der Seite.")
+        interesting = [h for h in hrefs if any(w in h.lower() for w in
+                       ["spieler", "player", "aufstell", "lineup", "team", "profil"])]
+        print(f"🔬 Beispiel-Links (gefiltert): {interesting[:12]}")
+        if not interesting:
+            print(f"🔬 Beispiel-Links (ungefiltert): {hrefs[:12]}")
     return set()
 
 
@@ -430,7 +486,7 @@ def get_ligainsider_lineups():
                 if name and len(name) > 2:
                     names.add(name.lower())
         return names
-    return _scrape_first_working(LIGAINSIDER_LINEUP_URLS, extract, "LigaInsider Startelf")
+    return _scrape_first_working(LIGAINSIDER_LINEUP_URLS, extract, "LigaInsider Startelf", diagnose=True)
 
 
 def get_ligainsider_injuries():
@@ -451,6 +507,18 @@ def get_ligainsider_injuries():
                 names.add(text.lower())
         return names
     return _scrape_first_working(LIGAINSIDER_INJURY_URLS, extract, "LigaInsider Verletzte")
+
+
+def name_in_collection(lastname, collection):
+    """
+    Prueft, ob ein Spielername als eigenstaendiges Wort in der Sammlung vorkommt.
+    Wortgrenzen statt Teilstring-Vergleich - sonst wuerde z.B. "Jung" auch in
+    "Jungwirth" treffen und bei 50+ Eintraegen viele Fehlalarme erzeugen.
+    """
+    if not lastname or len(lastname) < 3 or not collection:
+        return False
+    pattern = re.compile(r"\b" + re.escape(lastname.lower()) + r"\b")
+    return any(pattern.search(entry) for entry in collection)
 
 
 def match_news_for_player(lastname, headlines):
@@ -667,8 +735,8 @@ def evaluate_player(player, history, starters, injured_list, headlines, days_lef
     proj_mv, max_bid, raw_profit = predict_mv_and_overpay(mv, daily_trend, days_left)
 
     name_lower = name.lower()
-    is_starter = any(s in name_lower or name_lower in s for s in starters) if starters else None
-    is_injured = any(i in name_lower or name_lower in i for i in injured_list) if injured_list else False
+    is_starter = name_in_collection(name, starters) if starters else None
+    is_injured = name_in_collection(name, injured_list) if injured_list else False
 
     matched_news = match_news_for_player(name, headlines)[:CONFIG["NEWS_MAX_PER_PLAYER"]]
     negative_news = has_negative_news(matched_news)
