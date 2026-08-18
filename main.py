@@ -176,34 +176,49 @@ def get_market_players(token, league_id):
 # angeboten - also KEIN freier Kickbase-Spieler.
 SELLER_FIELD_CANDIDATES = ["u", "unm", "unn", "usm", "uid", "seller", "ownerId", "oid", "own"]
 
-def is_free_market_player(player):
-    """
-    True = von Kickbase auf den Markt gestellt (frei bietbar).
-    False = von einem Liga-Mitglied (inkl. dir selbst) angeboten.
-    Bewusst konservativ: nur wenn ein Verkaeufer-Feld eindeutig gefuellt ist,
-    gilt der Spieler als 'nicht frei'.
-    """
-    for k in SELLER_FIELD_CANDIDATES:
+def get_seller_name(player):
+    """Liest den Anbieter-Namen aus dem Spieler-Datensatz.
+    Kickbase liefert 'u' als Dict mit 'n' als Name (verifiziert aus Live-Daten)."""
+    u = player.get("u")
+    if isinstance(u, dict):
+        return u.get("n") or u.get("name")
+    if isinstance(u, str) and u.strip():
+        return u.strip()
+    for k in SELLER_FIELD_CANDIDATES[1:]:
         v = player.get(k)
-        if v not in (None, "", 0, "0"):
-            return False
-    return True
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+def is_free_market_player(player):
+    """True = von Kickbase gestellt (frei bietbar), False = von Mitglied angeboten."""
+    return get_seller_name(player) is None
+
+def get_lineup_prob(player):
+    """
+    Liest die Startelf-Wahrscheinlichkeit aus dem 'prob'-Feld.
+    Kickbase liefert dieses Feld fuer Premium-Nutzer (verifiziert in Feldliste).
+    Rueckgabe: Float 0-1, oder None wenn nicht vorhanden.
+    """
+    v = player.get("prob")
+    try:
+        f = float(v)
+        return f if 0.0 <= f <= 1.0 else None
+    except (TypeError, ValueError):
+        return None
 
 def diagnose_market_fields(players):
-    """Loggt einmalig die Feldnamen eines angebotenen und eines freien Spielers,
-    damit die Verkaeufer-Erkennung ohne Raten verifiziert werden kann."""
     all_keys = set()
     for p in players[:5]:
         all_keys.update(p.keys())
-    print(f"🔬 MARKT-FELDER (erste Spieler): {sorted(all_keys)}")
-    # Beispiel eines Spielers mit potenziellem Verkaeufer-Feld
+    print(f"🔬 MARKT-FELDER: {sorted(all_keys)}")
     for p in players:
-        hits = {k: p.get(k) for k in SELLER_FIELD_CANDIDATES if p.get(k) not in (None, "", 0, "0")}
-        if hits:
-            print(f"🔬 Beispiel ANGEBOTENER Spieler '{p.get('n')}': Verkaeufer-Felder = {hits}")
+        seller = get_seller_name(p)
+        if seller:
+            print(f"🔬 Angeboten von '{seller}': Spieler '{p.get('n')}'")
             break
     else:
-        print("🔬 Kein Spieler mit bekanntem Verkaeufer-Feld gefunden - evtl. anderes Feld, siehe Feldliste oben.")
+        print("🔬 Kein Spieler mit Verkaeufer-Feld gefunden.")
 
 def get_my_budget(token, league_id):
     for path in ["me/budget", "me"]:
@@ -818,6 +833,7 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
     blocked = [p for p in evaluated if p["category"] == "blocked"]
     pending = [p for p in evaluated if p["category"] == "pending"]
     skipped = [p for p in evaluated if p["category"] == "skip"]
+    offered = [p for p in evaluated if p["category"] == "market_offer"]
 
     # --- URGENCY-Alerts zuerst (Auktion läuft bald ab!) ---
     urgent = [p for p in tops + watch if p["is_urgent"]]
@@ -870,8 +886,13 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
     if pending:
         lines.append(f"\n⏳ <b>Noch beobachten</b> ({len(pending)} Spieler ohne Trendvergleich)")
 
+    footer_parts = []
     if skipped:
-        lines.append(f"\nℹ️ {len(skipped)} Spieler ohne nennenswerten Trend ausgeblendet.")
+        footer_parts.append(f"{len(skipped)} ohne nennenswerten Trend")
+    if offered:
+        footer_parts.append(f"{len(offered)} von Mitgliedern angeboten (getrackt)")
+    if footer_parts:
+        lines.append(f"\nℹ️ Ausgeblendet aber getrackt: {' + '.join(footer_parts)}.")
 
     if opponent_profiles:
         lines.append("\n🕵️ <b>Konkurrenz-Radar</b>")
@@ -947,10 +968,14 @@ def main():
     token, league_id, my_manager_id = kickbase_login()
     all_market = get_market_players(token, league_id)
     diagnose_market_fields(all_market)
-    raw_players = [p for p in all_market if is_free_market_player(p)]
-    filtered_out = len(all_market) - len(raw_players)
-    print(f"📊 {len(all_market)} Spieler am Markt, davon {len(raw_players)} frei "
-          f"({filtered_out} von Mitgliedern/dir angeboten und ausgeblendet).")
+
+    # Alle Spieler werden in der History getrackt (fuer spaeteres ML-Training).
+    # Im Report erscheinen aber nur freie Spieler - angebotene (von dir oder
+    # Gegnern) bekommen die Kategorie "market_offer" und werden ausgeblendet.
+    free_players = [p for p in all_market if is_free_market_player(p)]
+    offered_players = [p for p in all_market if not is_free_market_player(p)]
+    print(f"📊 {len(all_market)} Spieler am Markt: {len(free_players)} frei, "
+          f"{len(offered_players)} von Mitgliedern angeboten (getrackt, ausgeblendet).")
 
     injured = get_ligainsider_injuries()
     headlines = get_rss_headlines()
@@ -981,7 +1006,10 @@ def main():
     today_str = datetime.now(timezone.utc).date().isoformat()
     evaluated = []
 
-    for p in raw_players:
+    # Alle Spieler am Markt evaluieren (History-Tracking fuer alle - auch fuer
+    # spaeteres ML-Training mit angebotenen Spielern). Im Report erscheinen
+    # aber nur freie Spieler - angebotene bekommen Kategorie "market_offer".
+    for p in all_market:
         tid_str = str(p.get("tid")) if p.get("tid") else None
         team_key = KICKBASE_TID_TO_TEAM.get(tid_str) if tid_str else None
         if tid_str and not team_key and tid_str not in unmapped:
@@ -990,14 +1018,21 @@ def main():
         if team_key and team_key not in fixture_cache:
             fixture_cache[team_key] = fixture_difficulty(season_fixtures, team_key)
         fixture_info = fixture_cache.get(team_key) if team_key else None
-
-        # Wettquote des Vereins fuer das naechste Spiel
         win_prob = win_probs.get(team_key) if team_key else None
 
-        evaluated.append(evaluate_player(
+        res = evaluate_player(
             p, history, injured, headlines, days_left,
             my_team_counts, blocked_teams, my_budget,
-            fixture_info, win_prob, today_str))
+            fixture_info, win_prob, today_str)
+
+        # Angebotene Spieler: History wurde bereits aktualisiert (ML-Tracking),
+        # aber Kategorie auf "market_offer" setzen -> im Report unsichtbar
+        if not is_free_market_player(p):
+            seller = get_seller_name(p) or "?"
+            res["category"] = "market_offer"
+            res["reason"] = f"angeboten von {seller}"
+
+        evaluated.append(res)
 
     real_count = sum(1 for p in evaluated if p["has_real"])
     urgent_count = sum(1 for p in evaluated if p["is_urgent"])
