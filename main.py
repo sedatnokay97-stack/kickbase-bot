@@ -170,6 +170,41 @@ def get_market_players(token, league_id):
     print(f"⚠️ DEBUG RAW MARKTDATEN: {json.dumps(data)[:800]}")
     return []
 
+
+# Felder, die bei Kickbase ueblicherweise einen ANBIETENDEN Manager kennzeichnen.
+# Ist eins davon gesetzt/nicht-leer, wird der Spieler von einem Mitglied (oder dir)
+# angeboten - also KEIN freier Kickbase-Spieler.
+SELLER_FIELD_CANDIDATES = ["u", "unm", "unn", "usm", "uid", "seller", "ownerId", "oid", "own"]
+
+def is_free_market_player(player):
+    """
+    True = von Kickbase auf den Markt gestellt (frei bietbar).
+    False = von einem Liga-Mitglied (inkl. dir selbst) angeboten.
+    Bewusst konservativ: nur wenn ein Verkaeufer-Feld eindeutig gefuellt ist,
+    gilt der Spieler als 'nicht frei'.
+    """
+    for k in SELLER_FIELD_CANDIDATES:
+        v = player.get(k)
+        if v not in (None, "", 0, "0"):
+            return False
+    return True
+
+def diagnose_market_fields(players):
+    """Loggt einmalig die Feldnamen eines angebotenen und eines freien Spielers,
+    damit die Verkaeufer-Erkennung ohne Raten verifiziert werden kann."""
+    all_keys = set()
+    for p in players[:5]:
+        all_keys.update(p.keys())
+    print(f"🔬 MARKT-FELDER (erste Spieler): {sorted(all_keys)}")
+    # Beispiel eines Spielers mit potenziellem Verkaeufer-Feld
+    for p in players:
+        hits = {k: p.get(k) for k in SELLER_FIELD_CANDIDATES if p.get(k) not in (None, "", 0, "0")}
+        if hits:
+            print(f"🔬 Beispiel ANGEBOTENER Spieler '{p.get('n')}': Verkaeufer-Felder = {hits}")
+            break
+    else:
+        print("🔬 Kein Spieler mit bekanntem Verkaeufer-Feld gefunden - evtl. anderes Feld, siehe Feldliste oben.")
+
 def get_my_budget(token, league_id):
     for path in ["me/budget", "me"]:
         try:
@@ -721,20 +756,22 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     blocked_teams = blocked_teams or {}
     violates = tid is not None and my_team_counts.get(tid, 0) >= CONFIG["MAX_PER_TEAM"]
     opp_blocked = blocked_teams.get(tid, []) if tid is not None else []
-    budget_ok = my_budget is None or (max_bid is not None and max_bid <= my_budget)
 
     urgency_minutes = exs // 60 if exs > 0 else None
     is_urgent = urgency_minutes is not None and urgency_minutes <= CONFIG["URGENCY_THRESHOLD_MINUTES"]
 
+    # Reihenfolge wichtig: harte Blocker zuerst, DANN "kein Trend" (pending),
+    # erst danach Budget/Kaufkategorien. So landet ein Spieler ohne Tagesvergleich
+    # (max_bid == None) in "pending" und nicht faelschlich in "Budget zu teuer".
     if violates:
         category, reason = "blocked", "2-Spieler-Regel: du hast schon 2 aus diesem Verein"
     elif is_injured:
         category, reason = "blocked", "verletzt / gesperrt (LigaInsider)"
     elif negative:
         category, reason = "blocked", "negative Schlagzeile — erst prüfen"
-    elif not has_real:
+    elif not has_real or max_bid is None:
         category, reason = "pending", "noch kein Tagesvergleich — morgen entscheiden"
-    elif not budget_ok:
+    elif my_budget is not None and max_bid > my_budget:
         category, reason = "blocked", f"Gebot {fmt_money(max_bid)} über Budget"
     elif raw_profit >= 1_500_000:
         category, reason = "top", "hoher erwarteter Gewinn"
@@ -742,6 +779,8 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
         category, reason = "watch", "solider Aufwärtstrend"
     else:
         category, reason = "skip", "kein nennenswerter Trend"
+
+    budget_ok = max_bid is None or my_budget is None or max_bid <= my_budget
 
     return {
         "id": pid, "name": name, "mv": mv, "proj_mv": proj_mv,
@@ -906,8 +945,12 @@ def main():
     print("🚀 Starte Kickbase Bot Engine...")
 
     token, league_id, my_manager_id = kickbase_login()
-    raw_players = get_market_players(token, league_id)
-    print(f"📊 {len(raw_players)} Spieler auf dem Transfermarkt.")
+    all_market = get_market_players(token, league_id)
+    diagnose_market_fields(all_market)
+    raw_players = [p for p in all_market if is_free_market_player(p)]
+    filtered_out = len(all_market) - len(raw_players)
+    print(f"📊 {len(all_market)} Spieler am Markt, davon {len(raw_players)} frei "
+          f"({filtered_out} von Mitgliedern/dir angeboten und ausgeblendet).")
 
     injured = get_ligainsider_injuries()
     headlines = get_rss_headlines()
