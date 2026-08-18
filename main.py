@@ -9,9 +9,6 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 
-# ==========================================
-# CONFIG & ENVIRONMENT SECRETS
-# ==========================================
 KB_EMAIL = os.environ.get("KB_EMAIL")
 KB_PASSWORD = os.environ.get("KB_PASSWORD")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -42,6 +39,7 @@ CONFIG = {
     "RV_CONFIDENCE_FULL_AT_MATCHDAY": 4,
     "RV_CONFIDENCE_BASE": 0.5,
     "AVG_POINTS_PLAUSIBILITY_MAX": 320,
+    "PREDICTION_HIT_TOLERANCE": 0.5,
     "URGENCY_THRESHOLD_MINUTES": 180,
     "ODDS_SPORT": "soccer_germany_bundesliga",
     "ODDS_REGION": "eu",
@@ -104,17 +102,9 @@ TEAM_STRENGTH_DEFAULT = 45
 POSITION_NAMES = {1: "TW", 2: "ABW", 3: "MF", 4: "ANG"}
 POSITION_MIN_NEEDED = {1: 1, 2: 3, 3: 3, 4: 1}
 
-TEAMWERT_MIN_AVG_POINTS = {
-    1: 25,
-    2: 30,
-    3: 35,
-    4: 40,
-}
+TEAMWERT_MIN_AVG_POINTS = {1: 25, 2: 30, 3: 35, 4: 40}
 TEAMWERT_MIN_AVG_POINTS_DEFAULT = 30
 
-# ==========================================
-# HILFSFUNKTIONEN
-# ==========================================
 def fmt_money(value):
     try:
         value = int(value)
@@ -144,9 +134,6 @@ def fmt_minutes(seconds):
         return f"{m} min"
     return f"{m//60}h {m%60}m"
 
-# ==========================================
-# KNOTEN 1: KICKBASE LIVE API
-# ==========================================
 def kickbase_login():
     print("🚀 Starte Kickbase Login mit Android-Header...")
     headers = {"User-Agent": "Kickbase/8.10.0 (Android)", "Content-Type": "application/json"}
@@ -285,33 +272,26 @@ def extract_player_stats(detail):
     if not detail:
         return {"daily_trend_api": None, "status_code": None, "mdsum": None,
                 "mvt_flag": None, "avg_points": None}
-
     daily_trend_api = None
     v = detail.get("tfhmvt")
     if isinstance(v, (int, float)) and v != 0:
         daily_trend_api = int(v)
-
     status_code = None
     v = detail.get("prob")
     if isinstance(v, int) and 0 <= v <= 4:
         status_code = v
-
     mdsum = detail.get("mdsum")
     if not isinstance(mdsum, list):
         mdsum = None
-
     mvt_flag = detail.get("mvt")
-
     avg_points = None
     for apkey in ["ap", "stpkt", "avgPoints", "avp", "pts"]:
         v = detail.get(apkey)
         if isinstance(v, (int, float)) and v > 0:
             avg_points = float(v)
             break
-
     if avg_points is not None and avg_points > CONFIG["AVG_POINTS_PLAUSIBILITY_MAX"]:
         avg_points = None
-
     return {
         "daily_trend_api": daily_trend_api,
         "status_code": status_code,
@@ -368,9 +348,6 @@ def get_my_team_counts(token, league_id, my_manager_id):
         return {}
     return count_by_team(get_squad(token, league_id, my_manager_id))
 
-# ==========================================
-# KNOTEN 1b: LIGA-FEED
-# ==========================================
 def get_league_feed(token, league_id):
     for path in ["activitiesFeed", "feed", "activity"]:
         try:
@@ -427,9 +404,6 @@ def summarize_transfers(transfers):
             e["players"].append(t["player"])
     return summary
 
-# ==========================================
-# KNOTEN 2: WETTQUOTEN (The Odds API)
-# ==========================================
 def get_bundesliga_odds():
     if not ODDS_API_KEY:
         print("ℹ️ Kein ODDS_API_KEY - Wettquoten-Feature inaktiv.")
@@ -476,9 +450,6 @@ def matchup_factor(win_prob):
         return CONFIG["MATCHUP_FACTOR_NEUTRAL"]
     return CONFIG["MATCHUP_FACTOR_WEAK"]
 
-# ==========================================
-# KNOTEN 3: NEWS (RSS) + LIGAINSIDER
-# ==========================================
 def get_rss_headlines():
     headlines = []
     for url in NEWS_FEEDS:
@@ -561,9 +532,6 @@ def match_news(name, headlines):
 def has_neg_news(matched):
     return any(re.search(NEGATIVE_NEWS_PATTERN, h, re.IGNORECASE) for h in matched)
 
-# ==========================================
-# KNOTEN 4: RESTPROGRAMM (OpenLigaDB)
-# ==========================================
 def get_season_fixtures():
     url = f"https://api.openligadb.de/getmatchdata/bl1/{CONFIG['SEASON_YEAR']}"
     try:
@@ -659,9 +627,6 @@ def count_matchdays_played(fixtures):
     finished = sum(1 for m in fixtures if m.get("matchIsFinished"))
     return finished // 9
 
-# ==========================================
-# KNOTEN 5: HISTORY, TREND & MOMENTUM
-# ==========================================
 def load_history():
     if GITHUB_TOKEN and GITHUB_REPOSITORY:
         url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/{CONFIG['HISTORY_FILE']}"
@@ -725,6 +690,20 @@ def update_history(player_id, current_mv, history, today_str):
         elif entry.get("mv"):
             days = [{"d": "legacy", "mv": entry["mv"]}]
     days = [d for d in days if isinstance(d, dict) and d.get("mv")]
+
+    prediction_check = None
+    if days and days[-1].get("d") != today_str and days[-1].get("pred") is not None:
+        predicted_mv = days[-1]["pred"]
+        prev_mv = days[-1]["mv"]
+        actual_move = current_mv - prev_mv
+        predicted_move = predicted_mv - prev_mv
+        prediction_check = {
+            "predicted_mv": predicted_mv,
+            "actual_mv": current_mv,
+            "predicted_move": predicted_move,
+            "actual_move": actual_move,
+        }
+
     if days and days[-1].get("d") == today_str:
         days[-1]["mv"] = current_mv
     else:
@@ -734,8 +713,13 @@ def update_history(player_id, current_mv, history, today_str):
     mvs = [d["mv"] for d in days]
     if len(mvs) >= 2:
         deltas = [mvs[i] - mvs[i-1] for i in range(1, len(mvs))]
-        return deltas, True
-    return [], False
+        return deltas, True, prediction_check
+    return [], False, prediction_check
+
+def store_prediction(pid, history, predicted_next_mv):
+    pid = str(pid)
+    if pid in history and history[pid].get("days"):
+        history[pid]["days"][-1]["pred"] = int(predicted_next_mv)
 
 def compute_trend(deltas):
     if not deltas:
@@ -768,29 +752,22 @@ def predict(current_mv, daily_trend, days_left, overpay_factor):
     max_bid = int(current_mv + growth * overpay_factor)
     return proj_mv, max_bid, int(growth)
 
-# ==========================================
-# KNOTEN 6: SPIELER-BEWERTUNG
-# ==========================================
-STATUS_ICONS = {
-    0: "🔵",
-    1: "🟢",
-    2: "🟡",
-    3: "🟠",
-    4: "🔴",
-}
+def evaluate_prediction_hit(prediction_check):
+    if not prediction_check:
+        return None
+    predicted_move = prediction_check["predicted_move"]
+    actual_move = prediction_check["actual_move"]
+    if predicted_move == 0:
+        return None
+    same_direction = (predicted_move > 0) == (actual_move > 0)
+    ratio = actual_move / predicted_move if predicted_move != 0 else 0
+    tol = CONFIG["PREDICTION_HIT_TOLERANCE"]
+    is_hit = same_direction and (1 - tol) <= ratio <= (1 + tol)
+    return is_hit
 
-STATUS_LABELS = {
-    0: "garantiert", 1: "sicher", 2: "Rotation",
-    3: "unwahrscheinlich", 4: "bank/keine Chance",
-}
-
-STATUS_FACTORS = {
-    0: 1.15,
-    1: 1.10,
-    2: 1.00,
-    3: 0.90,
-    4: 0.75,
-}
+STATUS_ICONS = {0: "🔵", 1: "🟢", 2: "🟡", 3: "🟠", 4: "🔴"}
+STATUS_LABELS = {0: "garantiert", 1: "sicher", 2: "Rotation", 3: "unwahrscheinlich", 4: "bank/keine Chance"}
+STATUS_FACTORS = {0: 1.15, 1: 1.10, 2: 1.00, 3: 0.90, 4: 0.75}
 
 def lineup_factor_from_status(status_code):
     return STATUS_FACTORS.get(status_code, 1.0)
@@ -865,12 +842,15 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     mdsum = stats["mdsum"]
     avg_points = stats["avg_points"]
 
-    deltas, has_real = update_history(pid, mv, history, today_str)
+    deltas, has_real, prediction_check = update_history(pid, mv, history, today_str)
     calculated_trend, _ = compute_trend(deltas)
     daily_trend = kb_daily_trend if kb_daily_trend is not None else calculated_trend
     if kb_daily_trend is not None:
         has_real = True
     momentum = compute_momentum(deltas) if len(deltas) >= 3 else "neutral"
+
+    if daily_trend and daily_trend > 0:
+        store_prediction(pid, history, mv + daily_trend)
 
     if mdsum and not fixture_info:
         fixture_info = parse_mdsum(mdsum)
@@ -933,12 +913,10 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
         "overpay_factor": overpay_factor,
         "urgency_minutes": urgency_minutes, "is_urgent": is_urgent,
         "exs": exs,
+        "prediction_check": prediction_check,
     }
     return result
 
-# ==========================================
-# KNOTEN 7: REPORT
-# ==========================================
 def build_report(evaluated, my_budget, days_left, opponent_profiles,
                  transfer_summary, lineups_ok=True, odds_ok=True):
     lines = []
@@ -949,6 +927,28 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
         lines.append("⚠️ Startelf-Daten nicht verfügbar.")
     if not odds_ok:
         lines.append("⚠️ Wettquoten nicht verfügbar (ODDS_API_KEY prüfen).")
+
+    checks = [p["prediction_check"] for p in evaluated if p.get("prediction_check")]
+    if checks:
+        hits = [evaluate_prediction_hit(c) for c in checks]
+        valid_hits = [h for h in hits if h is not None]
+        if valid_hits:
+            hit_count = sum(1 for h in valid_hits if h)
+            lines.append(f"\n📊 PROGNOSE-CHECK (gestern -> heute)")
+            lines.append(f"Trefferquote: {hit_count}/{len(valid_hits)} ({hit_count/len(valid_hits)*100:.0f}%)")
+            examples = sorted(
+                [(p, c) for p, c in zip(
+                    [pp for pp in evaluated if pp.get("prediction_check")], checks)],
+                key=lambda x: abs(x[1]["actual_move"] - x[1]["predicted_move"]),
+                reverse=True,
+            )[:3]
+            for p, c in examples:
+                hit = evaluate_prediction_hit(c)
+                icon = "✅" if hit else ("❌" if hit is False else "➖")
+                lines.append(
+                    f"{icon} {esc(p['name'])}: prognostiziert {fmt_profit(c['predicted_move'])} €"
+                    f", tatsächlich {fmt_profit(c['actual_move'])} €"
+                )
 
     tops = sorted([p for p in evaluated if p["category"] == "top"],
                   key=lambda x: (x["is_urgent"], x["exp_profit"]), reverse=True)
@@ -1073,9 +1073,6 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
 
     return "\n".join(lines)
 
-# ==========================================
-# KNOTEN 8: TELEGRAM
-# ==========================================
 def split_message(message, maxlen):
     chunks, current = [], ""
     for line in message.splitlines():
@@ -1121,9 +1118,6 @@ def send_telegram(message):
         }, timeout=CONFIG["REQUEST_TIMEOUT"])
         time.sleep(0.25)
 
-# ==========================================
-# MAIN
-# ==========================================
 def main():
     print("Starte Kickbase Bot Engine...")
     token, league_id, my_manager_id = kickbase_login()
