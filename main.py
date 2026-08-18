@@ -24,37 +24,33 @@ CONFIG = {
     "DRY_RUN": False,
     "TELEGRAM_MAX_LEN": 4000,
     "REQUEST_TIMEOUT": 15,
-    "DAYS_UNTIL_MATCHDAY": 11,  # Fallback, wird aus echten Spieldaten abgeleitet
-    "OVERPAY_BASE_FACTOR": 0.60,  # Basiswert; Quoten und Momentum skalieren diesen
+    "DAYS_UNTIL_MATCHDAY": 11,
+    "OVERPAY_BASE_FACTOR": 0.60,
     "HISTORY_FILE": "history.json",
-    "MV_HISTORY_DAYS": 8,  # Mehr Tage = stabiler Median und bessere Momentum-Erkennung
+    "MV_HISTORY_DAYS": 8,
     "MAX_PER_TEAM": 2,
     "OPPONENT_FETCH_SLEEP": 0.3,
     "SEASON_YEAR": 2026,
     "FIXTURE_LOOKAHEAD": 3,
     "TOP_DETAIL_COUNT": 10,
-    "MIN_PROFIT_FOR_TOP": 300_000,   # Schwelle fuer BESTE CHANCEN (Gewinn-basiert)
-    "MIN_TEAMWERT_STATUS": 2,        # Max. status_code fuer Teamwert-Empfehlung (0=garantiert,1=sicher,2=Rotation)
-    "MAX_PER_TEAM_EARLY": 3,          # Vor-Saison-Lockerung der 2-Spieler-Regel
-    "MAX_PER_TEAM_FROM_MATCHDAY": 3,  # Ab diesem Spieltag greift wieder die normale Regel (2)
+    "MIN_PROFIT_FOR_TOP": 300_000,
+    "MIN_TEAMWERT_STATUS": 2,
+    "MAX_PER_TEAM_EARLY": 3,
+    "MAX_PER_TEAM_FROM_MATCHDAY": 3,
     "NEWS_MAX_PER_PLAYER": 2,
     "FEED_DEBUG_DUMP": False,
-    # Confidence-Daempfung fuer relative_value_score in den ersten Spieltagen
     "RV_CONFIDENCE_FULL_AT_MATCHDAY": 4,
     "RV_CONFIDENCE_BASE": 0.5,
-    # Urgency: Auktionen mit weniger als X Minuten Restlaufzeit kommen ganz oben
+    "AVG_POINTS_PLAUSIBILITY_MAX": 320,
     "URGENCY_THRESHOLD_MINUTES": 180,
-    # Odds API
     "ODDS_SPORT": "soccer_germany_bundesliga",
     "ODDS_REGION": "eu",
-    "ODDS_MARKET": "h2h",  # Head-to-Head = Siegquoten
-    # Matchup-Faktoren (Siegwahrscheinlichkeit -> Overpay-Multiplikator)
-    "MATCHUP_FACTOR_STRONG": 1.30,  # > 75% Siegchance
-    "MATCHUP_FACTOR_NEUTRAL": 1.00,  # 40-75%
-    "MATCHUP_FACTOR_WEAK": 0.75,  # < 40%
-    # Momentum-Faktoren
-    "MOMENTUM_BOOST": 1.25,  # Trend beschleunigt sich
-    "MOMENTUM_BRAKE": 0.80,  # Trend verlangsamt sich
+    "ODDS_MARKET": "h2h",
+    "MATCHUP_FACTOR_STRONG": 1.30,
+    "MATCHUP_FACTOR_NEUTRAL": 1.00,
+    "MATCHUP_FACTOR_WEAK": 0.75,
+    "MOMENTUM_BOOST": 1.25,
+    "MOMENTUM_BRAKE": 0.80,
 }
 
 NEWS_FEEDS = [
@@ -312,6 +308,9 @@ def extract_player_stats(detail):
         if isinstance(v, (int, float)) and v > 0:
             avg_points = float(v)
             break
+
+    if avg_points is not None and avg_points > CONFIG["AVG_POINTS_PLAUSIBILITY_MAX"]:
+        avg_points = None
 
     return {
         "daily_trend_api": daily_trend_api,
@@ -832,6 +831,13 @@ def is_teamwert_candidate(player_result):
         return True
     return False
 
+def teamwert_confidence(player_result):
+    avg_pts = player_result.get("avg_points")
+    rv = player_result.get("relative_value_score")
+    if avg_pts is not None or (rv is not None and rv > 0):
+        return "verified"
+    return "unverified"
+
 def evaluate_player(player, history, injured_list, headlines, days_left,
                     my_team_counts=None, blocked_teams=None, my_budget=None,
                     fixture_info=None, win_prob=None, today_str=None,
@@ -1008,22 +1014,34 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
         -(x.get("avg_points") or 0),
     ))
     if teamwert_neu:
-        lines.append("\n⭐ TEAMWERT-EMPFEHLUNGEN (Qualität unabhängig vom Trend)")
-        for p in teamwert_neu[:8]:
-            sc = p.get("status_code")
-            status_str = f"{STATUS_ICONS.get(sc, '')} {STATUS_LABELS.get(sc, '?')}" if sc is not None else "❓ Status unbekannt"
-            avg_str = f" · ⚽ Ø {p['avg_points']:.1f} Pkt" if p.get("avg_points") else ""
-            rv = p.get("relative_value_score")
-            rv_str = f" · 💎 Wert +{rv:.2f}" if rv is not None and rv > 0 else ""
-            trend_str = f" · 📈 {fmt_profit(p['kb_trend'])} €/Tag" if p.get("kb_trend") is not None else ""
-            bid_str = f"\n   👉 Max. Gebot: {fmt_money(p['max_bid'])} €" if p.get("max_bid") else ""
-            lines.append(
-                f"\n• {esc(p['name'])} — {fmt_money(p['mv'])} €\n"
-                f"   {status_str}{avg_str}{rv_str}{trend_str}{bid_str}"
-            )
-            if p["fixture"]:
-                opps = ", ".join(p["fixture"]["opponents"])
-                lines.append(f"   📅 {p['fixture']['label']} ({opps})")
+        verified = [p for p in teamwert_neu if teamwert_confidence(p) == "verified"]
+        unverified = [p for p in teamwert_neu if teamwert_confidence(p) == "unverified"]
+
+        if verified:
+            lines.append("\n⭐ TEAMWERT-EMPFEHLUNGEN (Qualität unabhängig vom Trend)")
+            for p in verified[:8]:
+                sc = p.get("status_code")
+                status_str = f"{STATUS_ICONS.get(sc, '')} {STATUS_LABELS.get(sc, '?')}" if sc is not None else "❓ Status unbekannt"
+                avg_str = f" · ⚽ Ø {p['avg_points']:.1f} Pkt" if p.get("avg_points") else ""
+                rv = p.get("relative_value_score")
+                rv_str = f" · 💎 Wert +{rv:.2f}" if rv is not None and rv > 0 else ""
+                trend_str = f" · 📈 {fmt_profit(p['kb_trend'])} €/Tag" if p.get("kb_trend") is not None else ""
+                bid_str = f"\n   👉 Max. Gebot: {fmt_money(p['max_bid'])} €" if p.get("max_bid") else ""
+                lines.append(
+                    f"\n• {esc(p['name'])} — {fmt_money(p['mv'])} €\n"
+                    f"   {status_str}{avg_str}{rv_str}{trend_str}{bid_str}"
+                )
+                if p["fixture"]:
+                    opps = ", ".join(p["fixture"]["opponents"])
+                    lines.append(f"   📅 {p['fixture']['label']} ({opps})")
+
+        if unverified:
+            lines.append("\n❓ UNGEPRÜFT (kein Punkteschnitt verfügbar — Status-basiert)")
+            for p in unverified[:5]:
+                sc = p.get("status_code")
+                status_str = f"{STATUS_ICONS.get(sc, '')} {STATUS_LABELS.get(sc, '?')}" if sc is not None else "?"
+                trend_str = f" · 📈 {fmt_profit(p['kb_trend'])} €/Tag" if p.get("kb_trend") is not None else ""
+                lines.append(f"• {esc(p['name'])} — {fmt_money(p['mv'])} € · {status_str}{trend_str}")
 
     if blocked:
         lines.append("\n🚫 Nicht bieten")
