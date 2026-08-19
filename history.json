@@ -1489,5 +1489,40 @@
       "price": 13095783,
       "date": "2026-08-18T21:00:50Z"
     }
-  }
+  },
+  "_squads": {
+    "MarvinKulas": {
+      "players": {},
+      "date": "2026-08-19"
+    },
+    "El Meiers 95": {
+      "players": {},
+      "date": "2026-08-19"
+    },
+    "Raaaaauuul31": {
+      "players": {},
+      "date": "2026-08-19"
+    },
+    "schalkerboy77": {
+      "players": {},
+      "date": "2026-08-19"
+    },
+    "MR_2606": {
+      "players": {},
+      "date": "2026-08-19"
+    },
+    "Gigi ": {
+      "players": {},
+      "date": "2026-08-19"
+    },
+    "MarioGomez33": {
+      "players": {},
+      "date": "2026-08-19"
+    },
+    "Apple User": {
+      "players": {},
+      "date": "2026-08-19"
+    }
+  },
+  "_sales": {}
 }
