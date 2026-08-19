@@ -323,6 +323,11 @@ def pos_gaps(pos_counts):
     return [f"{POSITION_NAMES.get(p, p)} ({pos_counts.get(p,0)}/{n})"
             for p, n in POSITION_MIN_NEEDED.items() if pos_counts.get(p, 0) < n]
 
+def missing_position_codes(pos_counts):
+    """Wie pos_gaps(), aber als rohe Positions-Codes statt Anzeige-Text -
+    fuer den programmatischen Abgleich (z.B. 'braucht Gegner X Position Y?')."""
+    return [p for p, n in POSITION_MIN_NEEDED.items() if pos_counts.get(p, 0) < n]
+
 def analyze_opponents(token, league_id, ranking_res, my_manager_id,
                       league_start_budget=None):
     blocked, profiles = {}, []
@@ -335,9 +340,11 @@ def analyze_opponents(token, league_id, ranking_res, my_manager_id,
         for tid, cnt in count_by_team(squad).items():
             if cnt >= CONFIG["MAX_PER_TEAM"]:
                 blocked.setdefault(tid, []).append(name)
+        pc = count_by_pos(squad)
         profiles.append({
             "name": name, "squad_size": len(squad),
-            "gaps": pos_gaps(count_by_pos(squad)),
+            "gaps": pos_gaps(pc),
+            "missing_positions": missing_position_codes(pc),
         })
         time.sleep(CONFIG["OPPONENT_FETCH_SLEEP"])
     print(f"🕵️ Konkurrenten analysiert: {len(profiles)}")
@@ -347,6 +354,61 @@ def get_my_team_counts(token, league_id, my_manager_id):
     if not my_manager_id:
         return {}
     return count_by_team(get_squad(token, league_id, my_manager_id))
+
+# ==========================================
+# TIEFENANALYSE (reine Code-Logik, keine externe KI)
+# ==========================================
+def assess_competition(pos_code, opponent_profiles, cash_by_name, price_threshold):
+    """
+    Findet Konkurrenten, die (a) diese Position brauchen UND (b) laut
+    Cash-Schaetzung genug Geld haben, um realistisch mitzubieten.
+    Nur eine Untergrenze (siehe build_opponent_cash_tracker) - Konkurrenten
+    koennen tatsaechlich mehr Cash haben als hier geschaetzt, nie weniger
+    fuer diesen Zweck relevant weniger.
+    """
+    if pos_code is None:
+        return []
+    competitors = []
+    for prof in opponent_profiles:
+        if pos_code not in prof.get("missing_positions", []):
+            continue
+        cash_info = cash_by_name.get(prof["name"])
+        min_cash = cash_info["min_cash"] if cash_info else None
+        if min_cash is not None and min_cash >= price_threshold:
+            competitors.append(prof["name"])
+    return competitors
+
+def build_deep_analysis(p, my_gap_codes, competitors):
+    """
+    Verbindet mehrere bereits berechnete Signale zu einer zusammenhaengenden
+    Einschaetzung - reine Code-Logik, kein LLM-Aufruf. Aendert nichts an
+    Kategorie/Sortierung/max_bid, ist nur eine zusaetzliche Erklaerzeile.
+    """
+    parts = []
+    pos_code = p.get("pos_code")
+    if pos_code is not None and pos_code in (my_gap_codes or []):
+        parts.append(f"füllt deine eigene Lücke auf {POSITION_NAMES.get(pos_code, pos_code)}")
+
+    sc = p.get("status_code")
+    if sc is not None:
+        if sc <= 1:
+            parts.append("Einsatz praktisch sicher")
+        elif sc == 2:
+            parts.append("Rotationsspieler, Einsatz nicht garantiert")
+        else:
+            parts.append("Einsatz fraglich — Trend evtl. nicht belastbar")
+
+    if p.get("fixture"):
+        parts.append(f"Restprogramm {p['fixture']['label']}")
+
+    if competitors:
+        names = ", ".join(competitors[:3])
+        extra = f" +{len(competitors)-3} weitere" if len(competitors) > 3 else ""
+        parts.append(f"⚠️ {len(competitors)} Konkurrent(en) mit Bedarf & Budget ({names}{extra}) — rechne mit Gegenwehr")
+    else:
+        parts.append("kein erkennbarer Konkurrenzdruck auf diese Position")
+
+    return " · ".join(parts)
 
 def get_league_feed(token, league_id):
     for path in ["activitiesFeed", "feed", "activity"]:
@@ -1062,6 +1124,8 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                 lines.append("   " + " · ".join(extras))
             for h in p["matched_news"]:
                 lines.append(f"   📰 {esc(h[:120])}")
+            if p.get("deep_analysis"):
+                lines.append(f"   🧠 {esc(p['deep_analysis'])}")
     else:
         lines.append("\n😐 Keine lohnenden Kaufchancen gefunden.")
 
@@ -1218,6 +1282,12 @@ def main():
     blocked_teams, opponent_profiles = analyze_opponents(
         token, league_id, ranking_res, my_manager_id)
 
+    # Eigene Positionsluecken (fuer die Tiefenanalyse: "fuellt dieser Kauf eine
+    # echte Luecke in meinem Kader?"). Separater Squad-Abruf, damit
+    # get_my_team_counts() unangetastet bleibt.
+    my_squad_items = get_squad(token, league_id, my_manager_id) if my_manager_id else []
+    my_gap_codes = missing_position_codes(count_by_pos(my_squad_items))
+
     feed_items = get_league_feed(token, league_id)
     transfers = parse_feed(feed_items)
     transfer_summary = summarize_transfers(transfers)
@@ -1228,6 +1298,7 @@ def main():
         transfer_summary,
     )
     print_cash_debug(cash_debug_rows)
+    cash_by_name = {row["name"]: row for row in cash_debug_rows}
 
     win_probs = get_bundesliga_odds()
     fixture_cache, unmapped = {}, set()
@@ -1265,6 +1336,17 @@ def main():
     real_count = sum(1 for p in evaluated if p["has_real"])
     urgent_count = sum(1 for p in evaluated if p["is_urgent"])
     print(f"Echte Trendsdaten: {real_count}/{len(evaluated)}, Urgency-Alerts: {urgent_count}")
+
+    # Tiefenanalyse nur fuer die Kandidaten, die sowieso im Report auftauchen
+    # wuerden (top/watch) - kein Sinn, das fuer alle 67 Spieler zu berechnen.
+    deep_candidates = sorted(
+        [p for p in evaluated if p["category"] in ("top", "watch")],
+        key=lambda x: x["exp_profit"], reverse=True
+    )[:8]
+    for p in deep_candidates:
+        competitors = assess_competition(
+            p.get("pos_code"), opponent_profiles, cash_by_name, p.get("max_bid") or 0)
+        p["deep_analysis"] = build_deep_analysis(p, my_gap_codes, competitors)
 
     save_history(history, history_sha)
     report = build_report(evaluated, my_budget, days_left, opponent_profiles,
