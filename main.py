@@ -24,7 +24,16 @@ CONFIG = {
     "DAYS_UNTIL_MATCHDAY": 11,
     "OVERPAY_BASE_FACTOR": 0.60,
     "HISTORY_FILE": "history.json",
-    "MV_HISTORY_DAYS": 8,
+    # 8 Tage reichen fuer die Trendberechnung, aber Spieler rotieren etwa alle
+    # 2-3 Wochen durch den Markt. Mit 25 Tagen bleibt der Verlauf ueber einen
+    # kompletten Zyklus erhalten - wichtig fuer Vergleiche "wie war sein Wert,
+    # als er das letzte Mal auf dem Markt war" und als Basis fuer spaeteres ML.
+    "MV_HISTORY_DAYS": 25,
+    # Rotierender Crawler: so viele zusaetzliche Spieler pro Lauf auffrischen.
+    # Bei 3 Laeufen/Tag sind ~500 Spieler in rund 3-4 Tagen einmal komplett
+    # durch, danach laufende Auffrischung. Auf 0 setzen zum Deaktivieren.
+    "CRAWL_BATCH_SIZE": 50,
+    "CRAWL_SLEEP": 0.2,
     "MAX_PER_TEAM": 2,
     "OPPONENT_FETCH_SLEEP": 0.3,
     "SEASON_YEAR": 2026,
@@ -432,9 +441,63 @@ def parse_feed(feed_items):
         price = next((int(flat[k]) for k in price_keys
                       if isinstance(flat.get(k), (int, float)) and flat[k] > 0), None)
         if buyer and player and price:
-            transfers.append({"buyer": buyer, "player": player, "price": price,
-                               "date": item.get("dt")})
+            transfers.append({
+                # Feed-ID zum Deduplizieren - ohne sie koennte derselbe Transfer
+                # bei jedem Lauf erneut gezaehlt werden.
+                "id": str(item.get("i") or ""),
+                "buyer": buyer, "player": player, "price": price,
+                "date": item.get("dt"),
+            })
     return transfers
+
+
+def merge_transfers_into_history(transfers, history):
+    """
+    Speichert Transfers dauerhaft in der History statt sie bei jedem Lauf
+    neu aus dem Feed zu zaehlen.
+
+    HINTERGRUND: Der Kickbase-Feed ist ein rollierendes Fenster - aeltere
+    Transfers verschwinden daraus. Wer nur den aktuellen Feed auswertet,
+    "vergisst" alte Kaeufe, wodurch die geschaetzte Cash-Untergrenze der
+    Gegner mit der Zeit faelschlich immer weiter steigt.
+
+    Deduplizierung ueber die Feed-ID. Transfers ohne ID bekommen einen
+    Ersatzschluessel aus Kaeufer+Spieler+Preis (gleicher Kauf zweimal am
+    selben Tag ist praktisch ausgeschlossen).
+    Rueckgabe: Anzahl NEU hinzugefuegter Transfers.
+    """
+    store = history.setdefault("_transfers", {})
+    added = 0
+    for t in transfers:
+        key = t.get("id") or f"{t['buyer']}|{t['player']}|{t['price']}"
+        if key in store:
+            continue
+        store[key] = {
+            "buyer": t["buyer"], "player": t["player"],
+            "price": t["price"], "date": t.get("date"),
+        }
+        added += 1
+    return added
+
+
+def summarize_transfers_from_history(history):
+    """
+    Baut die Kaufuebersicht aus ALLEN jemals gesehenen Transfers,
+    nicht nur aus dem aktuellen Feed-Fenster.
+    """
+    summary = {}
+    for entry in history.get("_transfers", {}).values():
+        buyer = entry.get("buyer")
+        price = entry.get("price")
+        if not buyer or not isinstance(price, (int, float)):
+            continue
+        e = summary.setdefault(buyer, {"count": 0, "total": 0, "players": []})
+        e["count"] += 1
+        e["total"] += int(price)
+        if len(e["players"]) < 3 and entry.get("player"):
+            e["players"].append(entry["player"])
+    return summary
+
 
 def summarize_transfers(transfers):
     summary = {}
@@ -445,6 +508,90 @@ def summarize_transfers(transfers):
         if len(e["players"]) < 3:
             e["players"].append(t["player"])
     return summary
+
+
+# ==========================================
+# ROTIERENDER CRAWLER
+# ==========================================
+def collect_known_player_ids(all_market, squads, history=None):
+    """
+    Sammelt alle bekannten Spieler-IDs aus:
+      - aktuellem Transfermarkt
+      - eigenem Kader + Kadern aller Gegner
+      - ALLEN bereits im Verlauf gespeicherten Spielern
+
+    Der letzte Punkt ist entscheidend: Spieler rotieren etwa alle 2-3 Wochen
+    durch den Markt. Wer nur die aktuellen Quellen abfragt, verliert einen
+    Spieler wieder aus dem Pool, sobald er den Markt verlaesst - sein Verlauf
+    wuerde einfrieren, bis er Wochen spaeter zufaellig wieder auftaucht.
+    Einmal gesehen = dauerhaft im Pool.
+    """
+    ids = set()
+    for p in all_market:
+        pid = p.get("id") or p.get("i")
+        if pid:
+            ids.add(str(pid))
+    for squad in squads:
+        for p in squad:
+            pid = p.get("id") or p.get("i")
+            if pid:
+                ids.add(str(pid))
+    # Bereits bekannte Spieler aus dem Verlauf uebernehmen (ohne Sonderschluessel
+    # wie "_transfers", die keine Spieler sind)
+    if history:
+        for key in history:
+            if not key.startswith("_"):
+                ids.add(str(key))
+    return ids
+
+
+def pick_crawl_batch(known_ids, history, batch_size, today_str):
+    """
+    Waehlt die naechste Portion Spieler zum Auffrischen.
+
+    Prioritaet: wer am laengsten nicht aktualisiert wurde, kommt zuerst.
+    Spieler, die heute schon einen Messpunkt haben (z.B. weil sie am Markt
+    stehen), werden uebersprungen - die sind ohnehin aktuell.
+    """
+    candidates = []
+    for pid in known_ids:
+        entry = history.get(pid)
+        if not entry or not entry.get("days"):
+            candidates.append((pid, ""))          # noch nie gesehen -> hoechste Prioritaet
+            continue
+        last_day = entry["days"][-1].get("d", "")
+        if last_day == today_str:
+            continue                               # heute bereits erfasst
+        candidates.append((pid, last_day))
+    # aelteste zuerst ("" sortiert vor jedem Datum)
+    candidates.sort(key=lambda x: x[1])
+    return [pid for pid, _ in candidates[:batch_size]]
+
+
+def crawl_players(token, league_id, player_ids, history, today_str, sleep_s=0.2):
+    """
+    Holt fuer eine Portion Spieler die Detaildaten und schreibt den
+    Marktwert in die History. Reine Datensammlung - diese Spieler
+    erscheinen NICHT im Report, sie bauen nur den Verlauf auf.
+    Rueckgabe: (erfolgreich, fehlgeschlagen)
+    """
+    ok, failed = 0, 0
+    for pid in player_ids:
+        try:
+            detail = get_player_detail(token, league_id, pid)
+            if not detail:
+                failed += 1
+                continue
+            mv = detail.get("mv") or detail.get("cv")
+            if isinstance(mv, (int, float)) and mv > 0:
+                update_history(pid, int(mv), history, today_str)
+                ok += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+        time.sleep(sleep_s)
+    return ok, failed
 
 LEAGUE_START_DATE = date(2026, 8, 15)
 OPPONENT_START_CASH = 50_000_000
@@ -727,7 +874,10 @@ def load_history():
             data = resp.json()
             h = json.loads(base64.b64decode(data["content"]).decode("utf-8"))
             h.pop("players", None)
-            print(f"✅ Verlauf geladen ({len(h)} Spieler).")
+            # "_transfers" ist der Transfer-Speicher, kein Spieler - nicht mitzaehlen
+            player_count = sum(1 for k in h if not k.startswith("_"))
+            tx_count = len(h.get("_transfers", {}))
+            print(f"✅ Verlauf geladen ({player_count} Spieler, {tx_count} Transfers).")
             return h, data.get("sha")
         except Exception as e:
             print(f"⚠️ Verlauf nicht ladbar: {e}")
@@ -1293,8 +1443,10 @@ def main():
 
     feed_items = get_league_feed(token, league_id)
     transfers = parse_feed(feed_items)
-    transfer_summary = summarize_transfers(transfers)
-    print(f"Transfers im Feed: {len(transfers)}")
+    new_tx = merge_transfers_into_history(transfers, history)
+    transfer_summary = summarize_transfers_from_history(history)
+    total_tx = len(history.get("_transfers", {}))
+    print(f"Transfers im Feed: {len(transfers)} ({new_tx} neu) | gespeichert gesamt: {total_tx}")
 
     cash_debug_rows = build_opponent_cash_tracker(
         opponent_profiles,
@@ -1339,6 +1491,29 @@ def main():
     real_count = sum(1 for p in evaluated if p["has_real"])
     urgent_count = sum(1 for p in evaluated if p["is_urgent"])
     print(f"Echte Trendsdaten: {real_count}/{len(evaluated)}, Urgency-Alerts: {urgent_count}")
+
+    # --- Rotierender Crawler: Verlauf fuer Spieler ausserhalb des Marktes ---
+    # Baut ueber mehrere Laeufe die Datenbasis fuer alle bekannten Spieler auf,
+    # damit neu auf dem Markt erscheinende Spieler sofort einen echten Trend
+    # haben statt erst zwei Tage "kein Trendvergleich" zu zeigen.
+    if CONFIG["CRAWL_BATCH_SIZE"] > 0:
+        opponent_squads = []
+        for uid, _name in extract_league_users(ranking_res):
+            if str(uid) != str(my_manager_id):
+                opponent_squads.append(get_squad(token, league_id, uid))
+                time.sleep(CONFIG["OPPONENT_FETCH_SLEEP"])
+        known_ids = collect_known_player_ids(
+            all_market, opponent_squads + [my_squad_items], history)
+        batch = pick_crawl_batch(known_ids, history,
+                                 CONFIG["CRAWL_BATCH_SIZE"], today_str)
+        if batch:
+            ok, failed = crawl_players(token, league_id, batch, history,
+                                       today_str, CONFIG["CRAWL_SLEEP"])
+            tracked = sum(1 for k in history if not k.startswith("_"))
+            print(f"Crawler: {len(known_ids)} IDs bekannt, {len(batch)} aufgefrischt "
+                  f"({ok} ok, {failed} fehlgeschlagen) | Verlauf gesamt: {tracked} Spieler")
+        else:
+            print(f"Crawler: alle {len(known_ids)} bekannten Spieler heute bereits erfasst.")
 
     save_history(history, history_sha)
     report = build_report(evaluated, my_budget, days_left, opponent_profiles,
