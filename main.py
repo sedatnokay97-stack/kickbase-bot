@@ -944,7 +944,15 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     elif my_budget is not None and max_bid > my_budget:
         category, reason = "blocked", f"Gebot {fmt_money(max_bid)} über Budget"
     elif raw_profit >= 1_500_000:
-        category, reason = "top", "hoher erwarteter Gewinn"
+        # Hoher Marktwert-Trend allein reicht nicht fuer "top": ein Spieler ohne
+        # realistische Einsatzchance (unwahrscheinlich/bank) wird bewusst auf
+        # "watch" gedeckelt, damit er echte sichere Kandidaten nicht von Platz 1
+        # verdraengt. Der Trend bleibt sichtbar, aber die Rangfolge stimmt.
+        if status_code is not None and status_code >= 3:
+            category = "watch"
+            reason = f"hoher Trend, aber {STATUS_LABELS.get(status_code, 'unsicherer Status')} — Einsatz fraglich"
+        else:
+            category, reason = "top", "hoher erwarteter Gewinn"
     elif raw_profit >= CONFIG["MIN_PROFIT_FOR_TOP"]:
         category, reason = "watch", "solider Aufwärtstrend"
     else:
