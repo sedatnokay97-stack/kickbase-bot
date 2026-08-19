@@ -1217,11 +1217,31 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
     if footer_parts:
         lines.append(f"\nℹ️ Ausgeblendet aber getrackt: {' · '.join(footer_parts)}.")
 
-    if opponent_profiles:
-        lines.append("\n🕵️ Konkurrenz-Radar")
-        for prof in sorted(opponent_profiles, key=lambda x: x["squad_size"]):
-            g = ", ".join(prof["gaps"]) if prof["gaps"] else "vollständig"
-            lines.append(f"• {esc(prof['name'])}: {prof['squad_size']} Spieler · {g}")
+if opponent_profiles:
+    lines.append("\n🕵️ Konkurrenz-Radar")
+    cash_by_name = {
+        row["name"]: row
+        for row in build_opponent_cash_tracker(
+            opponent_profiles,
+            transfer_summary,
+        )
+    }
+
+    for prof in sorted(opponent_profiles, key=lambda x: x["squad_size"]):
+        gaps = ", ".join(prof["gaps"]) if prof["gaps"] else "vollständig"
+        cash = cash_by_name.get(prof["name"])
+        cash_text = ""
+
+        if cash:
+            cash_text = (
+                f" · Cash ≥ {fmt_money(cash['min_cash'])} €"
+                f" · Käufe {cash['known_buy_count']}×"
+            )
+
+        lines.append(
+            f"-  {esc(prof['name'])}: {prof['squad_size']} Spieler"
+            f" · {gaps}{cash_text}"
+        )
 
     if transfer_summary:
         lines.append("\n💸 Transfer-Aktivität")
