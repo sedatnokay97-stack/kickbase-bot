@@ -1,4 +1,4 @@
- """
+"""
 Kickbase Bot Engine - Vollversion mit:
 - Budget-Tracker (50 Mio + gestaffelter Login-Bonus)
 - Full-Crawler (alle ~500 Bundesliga-Spieler)
