@@ -6,7 +6,7 @@ import time
 import base64
 import requests
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from bs4 import BeautifulSoup
 
 KB_EMAIL = os.environ.get("KB_EMAIL")
@@ -403,7 +403,62 @@ def summarize_transfers(transfers):
         if len(e["players"]) < 3:
             e["players"].append(t["player"])
     return summary
+LEAGUE_START_DATE = date(2026, 8, 15)
+OPPONENT_START_CASH = 50_000_000
 
+
+def cumulative_login_bonus_per_player(today=None):
+    """Kumulierter Kickbase-Login-Bonus pro Spieler seit dem Liga-Start."""
+    today = today or date.today()
+    days = max(1, (today - LEAGUE_START_DATE).days + 1)
+
+    if days <= 9:
+        return 10_000 * days * (days + 1) // 2
+
+    return 450_000 + (days - 9) * 100_000
+
+
+def build_opponent_cash_tracker(opponent_profiles, transfer_summary, today=None):
+    """
+    Konservative Untergrenze:
+    50 Mio Startcash + Login-Boni − bekannte Käufe.
+
+    Verkaufserlöse werden noch nicht eingerechnet.
+    """
+    bonus_per_player = cumulative_login_bonus_per_player(today)
+    rows = []
+
+    for profile in opponent_profiles:
+        name = profile["name"]
+        squad_size = profile["squad_size"]
+        buys = transfer_summary.get(name, {"count": 0, "total": 0})
+        login_bonus = bonus_per_player * squad_size
+        min_cash = OPPONENT_START_CASH + login_bonus - buys["total"]
+
+        rows.append({
+            "name": name,
+            "squad_size": squad_size,
+            "known_buy_count": buys["count"],
+            "known_buy_total": buys["total"],
+            "login_bonus": login_bonus,
+            "min_cash": min_cash,
+        })
+
+    return rows
+
+
+def print_cash_debug(cash_rows):
+    """Schreibt die Berechnung in die GitHub-Actions-Logs."""
+    print("\n💰 CASH DEBUG — Untergrenze ohne bestätigte Verkaufserlöse")
+
+    for row in sorted(cash_rows, key=lambda item: item["min_cash"]):
+        print(
+            f"• {row['name']}: Cash ≥ {fmt_money(row['min_cash'])} "
+            f"| Start 50,0 Mio "
+            f"| Boni +{fmt_money(row['login_bonus'])} "
+            f"| Käufe -{fmt_money(row['known_buy_total'])} "
+            f"({row['known_buy_count']}×)"
+        )
 def get_bundesliga_odds():
     if not ODDS_API_KEY:
         print("ℹ️ Kein ODDS_API_KEY - Wettquoten-Feature inaktiv.")
