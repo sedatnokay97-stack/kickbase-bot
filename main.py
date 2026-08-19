@@ -380,26 +380,16 @@ def assess_competition(pos_code, opponent_profiles, cash_by_name, price_threshol
 
 def build_deep_analysis(p, my_gap_codes, competitors):
     """
-    Verbindet mehrere bereits berechnete Signale zu einer zusammenhaengenden
-    Einschaetzung - reine Code-Logik, kein LLM-Aufruf. Aendert nichts an
-    Kategorie/Sortierung/max_bid, ist nur eine zusaetzliche Erklaerzeile.
+    Verbindet Signale zu einer zusammenhaengenden Einschaetzung - reine
+    Code-Logik, kein LLM-Aufruf. Zeigt bewusst NUR, was die Extras-Zeile
+    darueber noch nicht sagt (Status/Restprogramm stehen dort schon als
+    Icons) - sonst wiederholt sich die Nachricht nur selbst.
+    Aendert nichts an Kategorie/Sortierung/max_bid.
     """
     parts = []
     pos_code = p.get("pos_code")
     if pos_code is not None and pos_code in (my_gap_codes or []):
         parts.append(f"füllt deine eigene Lücke auf {POSITION_NAMES.get(pos_code, pos_code)}")
-
-    sc = p.get("status_code")
-    if sc is not None:
-        if sc <= 1:
-            parts.append("Einsatz praktisch sicher")
-        elif sc == 2:
-            parts.append("Rotationsspieler, Einsatz nicht garantiert")
-        else:
-            parts.append("Einsatz fraglich — Trend evtl. nicht belastbar")
-
-    if p.get("fixture"):
-        parts.append(f"Restprogramm {p['fixture']['label']}")
 
     if competitors:
         names = ", ".join(competitors[:3])
@@ -408,7 +398,7 @@ def build_deep_analysis(p, my_gap_codes, competitors):
     else:
         parts.append("kein erkennbarer Konkurrenzdruck auf diese Position")
 
-    return " · ".join(parts)
+    return " · ".join(parts) if parts else None
 
 def get_league_feed(token, league_id):
     for path in ["activitiesFeed", "feed", "activity"]:
@@ -1045,7 +1035,8 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     return result
 
 def build_report(evaluated, my_budget, days_left, opponent_profiles,
-                 transfer_summary, lineups_ok=True, odds_ok=True):
+                 transfer_summary, lineups_ok=True, odds_ok=True,
+                 my_gap_codes=None, cash_by_name=None):
     lines = []
     lines.append(f"⚽ Kickbase Markt-Report — noch {days_left} Tage")
     if my_budget is not None:
@@ -1087,6 +1078,17 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
     offered = [p for p in evaluated if p["category"] == "market_offer"]
 
     urgent = [p for p in tops + watch if p["is_urgent"]]
+    detail_list = [p for p in tops + watch if not p["is_urgent"]][:CONFIG["TOP_DETAIL_COUNT"]]
+
+    # Tiefenanalyse fuer GENAU die Kandidaten, die tatsaechlich angezeigt werden -
+    # eilige zuerst, denn dort ist eine fundierte Einschaetzung am wertvollsten
+    # (wenig Zeit zum Nachdenken). Kein Berechnen fuer Kandidaten, die eh nicht
+    # im Report auftauchen.
+    for p in urgent + detail_list:
+        competitors = assess_competition(
+            p.get("pos_code"), opponent_profiles or [], cash_by_name or {}, p.get("max_bid") or 0)
+        p["deep_analysis"] = build_deep_analysis(p, my_gap_codes or [], competitors)
+
     if urgent:
         lines.append("\n⏰ JETZT HANDELN (Auktion läuft bald ab!)")
         for p in urgent:
@@ -1096,8 +1098,9 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                 f" | Gewinn: {fmt_profit(p['exp_profit'])} €"
                 f" | Gebot bis {fmt_money(p['max_bid'])} €"
             )
+            if p.get("deep_analysis"):
+                lines.append(f"  🧠 {esc(p['deep_analysis'])}")
 
-    detail_list = [p for p in tops + watch if not p["is_urgent"]][:CONFIG["TOP_DETAIL_COUNT"]]
     if detail_list:
         lines.append("\n🔥 BESTE CHANCEN (nach erwartetem Gewinn)")
         for i, p in enumerate(detail_list, start=1):
@@ -1337,20 +1340,10 @@ def main():
     urgent_count = sum(1 for p in evaluated if p["is_urgent"])
     print(f"Echte Trendsdaten: {real_count}/{len(evaluated)}, Urgency-Alerts: {urgent_count}")
 
-    # Tiefenanalyse nur fuer die Kandidaten, die sowieso im Report auftauchen
-    # wuerden (top/watch) - kein Sinn, das fuer alle 67 Spieler zu berechnen.
-    deep_candidates = sorted(
-        [p for p in evaluated if p["category"] in ("top", "watch")],
-        key=lambda x: x["exp_profit"], reverse=True
-    )[:8]
-    for p in deep_candidates:
-        competitors = assess_competition(
-            p.get("pos_code"), opponent_profiles, cash_by_name, p.get("max_bid") or 0)
-        p["deep_analysis"] = build_deep_analysis(p, my_gap_codes, competitors)
-
     save_history(history, history_sha)
     report = build_report(evaluated, my_budget, days_left, opponent_profiles,
-                          transfer_summary, lineups_ok=False, odds_ok=bool(win_probs))
+                          transfer_summary, lineups_ok=False, odds_ok=bool(win_probs),
+                          my_gap_codes=my_gap_codes, cash_by_name=cash_by_name)
     send_telegram(report)
     print("Pipeline-Durchlauf vollkommen erfolgreich beendet!")
 
