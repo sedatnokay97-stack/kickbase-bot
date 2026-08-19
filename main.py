@@ -324,8 +324,6 @@ def pos_gaps(pos_counts):
             for p, n in POSITION_MIN_NEEDED.items() if pos_counts.get(p, 0) < n]
 
 def missing_position_codes(pos_counts):
-    """Wie pos_gaps(), aber als rohe Positions-Codes statt Anzeige-Text -
-    fuer den programmatischen Abgleich (z.B. 'braucht Gegner X Position Y?')."""
     return [p for p, n in POSITION_MIN_NEEDED.items() if pos_counts.get(p, 0) < n]
 
 def analyze_opponents(token, league_id, ranking_res, my_manager_id,
@@ -355,21 +353,7 @@ def get_my_team_counts(token, league_id, my_manager_id):
         return {}
     return count_by_team(get_squad(token, league_id, my_manager_id))
 
-# ==========================================
-# TIEFENANALYSE (reine Code-Logik, keine externe KI)
-# ==========================================
 def assess_competition(pos_code, opponent_profiles, cash_by_name, price_threshold):
-    """
-    Findet Konkurrenten, die diese Position brauchen, sortiert nach
-    geschaetztem Cash (staerkster zuerst).
-
-    WICHTIG zur Interpretation: min_cash ist eine UNTERGRENZE (Startkapital +
-    Boni - bekannte Kaeufe, ohne Verkaufserloese). Daraus folgt:
-    - "Rivale kann dich ueberbieten" ist sicher, wenn min_cash > dein Limit.
-    - "Rivale kann NICHT mitbieten" ist NIE sicher, weil er mehr haben kann
-      als die Untergrenze zeigt. Deshalb wird das bewusst nie behauptet.
-    Rueckgabe: Liste von (name, min_cash), absteigend nach min_cash.
-    """
     if pos_code is None:
         return []
     competitors = []
@@ -383,10 +367,6 @@ def assess_competition(pos_code, opponent_profiles, cash_by_name, price_threshol
     return competitors
 
 def build_deep_analysis(p, my_gap_codes, competitors):
-    """
-    Verbindet Signale zu einer Einschaetzung - reine Code-Logik, kein LLM.
-    Zeigt bewusst NUR, was die Extras-Zeile darueber noch nicht sagt.
-    """
     parts = []
     pos_code = p.get("pos_code")
     pos_name = POSITION_NAMES.get(pos_code, pos_code)
@@ -400,7 +380,6 @@ def build_deep_analysis(p, my_gap_codes, competitors):
     else:
         top_name, top_cash = competitors[0]
         if top_cash is not None and max_bid is not None and top_cash > max_bid:
-            # Sichere Aussage: Untergrenze liegt bereits ueber deinem Limit
             parts.append(
                 f"⚠️ {top_name} braucht {pos_name} und hat mind. {fmt_money(top_cash)} "
                 f"— kann dein Limit von {fmt_money(max_bid)} überbieten"
@@ -466,13 +445,11 @@ def summarize_transfers(transfers):
         if len(e["players"]) < 3:
             e["players"].append(t["player"])
     return summary
-    
+
 LEAGUE_START_DATE = date(2026, 8, 15)
 OPPONENT_START_CASH = 50_000_000
 
-
 def cumulative_login_bonus_per_player(today=None):
-    """Kumulierter Kickbase-Login-Bonus pro Spieler seit dem Liga-Start."""
     today = today or date.today()
     days = max(1, (today - LEAGUE_START_DATE).days + 1)
 
@@ -481,14 +458,7 @@ def cumulative_login_bonus_per_player(today=None):
 
     return 450_000 + (days - 9) * 100_000
 
-
 def build_opponent_cash_tracker(opponent_profiles, transfer_summary, today=None):
-    """
-    Konservative Untergrenze:
-    50 Mio Startcash + Login-Boni − bekannte Käufe.
-
-    Verkaufserlöse werden noch nicht eingerechnet.
-    """
     bonus_per_player = cumulative_login_bonus_per_player(today)
     rows = []
 
@@ -510,9 +480,7 @@ def build_opponent_cash_tracker(opponent_profiles, transfer_summary, today=None)
 
     return rows
 
-
 def print_cash_debug(cash_rows):
-    """Schreibt die Berechnung in die GitHub-Actions-Logs."""
     print("\n💰 CASH DEBUG — Untergrenze ohne bestätigte Verkaufserlöse")
 
     for row in sorted(cash_rows, key=lambda item: item["min_cash"]):
@@ -1007,10 +975,6 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     elif my_budget is not None and max_bid > my_budget:
         category, reason = "blocked", f"Gebot {fmt_money(max_bid)} über Budget"
     elif raw_profit >= 1_500_000:
-        # Hoher Marktwert-Trend allein reicht nicht fuer "top": ein Spieler ohne
-        # realistische Einsatzchance (unwahrscheinlich/bank) wird bewusst auf
-        # "watch" gedeckelt, damit er echte sichere Kandidaten nicht von Platz 1
-        # verdraengt. Der Trend bleibt sichtbar, aber die Rangfolge stimmt.
         if status_code is not None and status_code >= 3:
             category = "watch"
             reason = f"hoher Trend, aber {STATUS_LABELS.get(status_code, 'unsicherer Status')} — Einsatz fraglich"
@@ -1091,10 +1055,6 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
     urgent = [p for p in tops + watch if p["is_urgent"]]
     detail_list = [p for p in tops + watch if not p["is_urgent"]][:CONFIG["TOP_DETAIL_COUNT"]]
 
-    # Tiefenanalyse fuer GENAU die Kandidaten, die tatsaechlich angezeigt werden -
-    # eilige zuerst, denn dort ist eine fundierte Einschaetzung am wertvollsten
-    # (wenig Zeit zum Nachdenken). Kein Berechnen fuer Kandidaten, die eh nicht
-    # im Report auftauchen.
     for p in urgent + detail_list:
         competitors = assess_competition(
             p.get("pos_code"), opponent_profiles or [], cash_by_name or {}, p.get("max_bid") or 0)
@@ -1113,9 +1073,6 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                 lines.append(f"  🧠 {esc(p['deep_analysis'])}")
 
     if detail_list:
-        # Top und Watch getrennt ausgeben: sonst sieht ein wegen Bank-Status
-        # herabgestufter Spieler durch die durchlaufende Nummerierung trotzdem
-        # aus wie eine Top-Empfehlung.
         detail_top = [p for p in detail_list if p["category"] == "top"]
         detail_watch = [p for p in detail_list if p["category"] == "watch"]
 
@@ -1217,37 +1174,37 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
     if footer_parts:
         lines.append(f"\nℹ️ Ausgeblendet aber getrackt: {' · '.join(footer_parts)}.")
 
-if opponent_profiles:
-    lines.append("\n🕵️ Konkurrenz-Radar")
-    cash_by_name = {
-        row["name"]: row
-        for row in build_opponent_cash_tracker(
-            opponent_profiles,
-            transfer_summary,
-        )
-    }
+    if opponent_profiles:
+        lines.append("\n🕵️ Konkurrenz-Radar")
+        cash_by_name = {
+            row["name"]: row
+            for row in build_opponent_cash_tracker(
+                opponent_profiles,
+                transfer_summary,
+            )
+        }
 
-    for prof in sorted(opponent_profiles, key=lambda x: x["squad_size"]):
-        gaps = ", ".join(prof["gaps"]) if prof["gaps"] else "vollständig"
-        cash = cash_by_name.get(prof["name"])
-        cash_text = ""
+        for prof in sorted(opponent_profiles, key=lambda x: x["squad_size"]):
+            gaps = ", ".join(prof["gaps"]) if prof["gaps"] else "vollständig"
+            cash = cash_by_name.get(prof["name"])
+            cash_text = ""
 
-        if cash:
-            cash_text = (
-                f" · Cash ≥ {fmt_money(cash['min_cash'])} €"
-                f" · Käufe {cash['known_buy_count']}×"
+            if cash:
+                cash_text = (
+                    f" · Cash ≥ {fmt_money(cash['min_cash'])} €"
+                    f" · Käufe {cash['known_buy_count']}×"
+                )
+
+            lines.append(
+                f"-  {esc(prof['name'])}: {prof['squad_size']} Spieler"
+                f" · {gaps}{cash_text}"
             )
 
-        lines.append(
-            f"-  {esc(prof['name'])}: {prof['squad_size']} Spieler"
-            f" · {gaps}{cash_text}"
-        )
-
-    if transfer_summary:
-        lines.append("\n💸 Transfer-Aktivität")
-        for mgr, info in sorted(transfer_summary.items(), key=lambda x: x[1]["total"], reverse=True)[:7]:
-            pl = ", ".join(info["players"])
-            lines.append(f"• {esc(mgr)}: {info['count']}×, {fmt_money(info['total'])} € ({esc(pl)})")
+        if transfer_summary:
+            lines.append("\n💸 Transfer-Aktivität")
+            for mgr, info in sorted(transfer_summary.items(), key=lambda x: x[1]["total"], reverse=True)[:7]:
+                pl = ", ".join(info["players"])
+                lines.append(f"• {esc(mgr)}: {info['count']}×, {fmt_money(info['total'])} € ({esc(pl)})")
 
     return "\n".join(lines)
 
@@ -1331,9 +1288,6 @@ def main():
     blocked_teams, opponent_profiles = analyze_opponents(
         token, league_id, ranking_res, my_manager_id)
 
-    # Eigene Positionsluecken (fuer die Tiefenanalyse: "fuellt dieser Kauf eine
-    # echte Luecke in meinem Kader?"). Separater Squad-Abruf, damit
-    # get_my_team_counts() unangetastet bleibt.
     my_squad_items = get_squad(token, league_id, my_manager_id) if my_manager_id else []
     my_gap_codes = missing_position_codes(count_by_pos(my_squad_items))
 
