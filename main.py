@@ -48,6 +48,9 @@ CONFIG = {
     "RV_CONFIDENCE_FULL_AT_MATCHDAY": 4,
     "RV_CONFIDENCE_BASE": 0.5,
     "AVG_POINTS_PLAUSIBILITY_MAX": 320,
+    # Wird zur Laufzeit automatisch auf True gesetzt, sobald die Feldzuordnung
+    # fuer die Einsatzzahl gegengeprueft und bestaetigt ist.
+    "USE_APPEARANCE_WEIGHT": False,
     "PREDICTION_HIT_TOLERANCE": 0.5,
     "URGENCY_THRESHOLD_MINUTES": 180,
     "ODDS_SPORT": "soccer_germany_bundesliga",
@@ -280,7 +283,8 @@ def get_player_detail(token, league_id, player_id):
 def extract_player_stats(detail):
     if not detail:
         return {"daily_trend_api": None, "status_code": None, "mdsum": None,
-                "mvt_flag": None, "avg_points": None}
+                "mvt_flag": None, "avg_points": None,
+                "appearances": None, "total_points": None}
     daily_trend_api = None
     v = detail.get("tfhmvt")
     if isinstance(v, (int, float)) and v != 0:
@@ -301,13 +305,78 @@ def extract_player_stats(detail):
             break
     if avg_points is not None and avg_points > CONFIG["AVG_POINTS_PLAUSIBILITY_MAX"]:
         avg_points = None
+
+    # Einsaetze und Gesamtpunkte der Vorsaison.
+    # Ein Oe-Punkte-Wert aus 29 Spielen ist eine Aussage, einer aus 2 Spielen
+    # Zufall - der Bot behandelte beide bisher gleich.
+    # UNBESTAETIGT: "smdc"/"stud" sind Kandidaten aus dem Karius-Rohdump. Die
+    # Zuordnung wird zur Laufzeit gegengeprueft (verify_appearance_mapping):
+    # total_points / appearances muss ungefaehr den Oe-Punkten entsprechen.
+    appearances = None
+    for k in ("smdc", "mdc", "apps", "games", "ec"):
+        v = detail.get(k)
+        if isinstance(v, int) and 0 < v <= 40:
+            appearances = v
+            break
+    total_points = None
+    for k in ("stud", "tp", "totalPoints", "sp"):
+        v = detail.get(k)
+        if isinstance(v, (int, float)) and v > 0:
+            total_points = int(v)
+            break
+
     return {
         "daily_trend_api": daily_trend_api,
         "status_code": status_code,
         "mdsum": mdsum,
         "mvt_flag": mvt_flag,
         "avg_points": avg_points,
+        "appearances": appearances,
+        "total_points": total_points,
     }
+
+
+def verify_appearance_mapping(samples, tolerance=0.15):
+    """
+    Gegenprobe fuer die Feldzuordnung: Stimmt "total_points / appearances"
+    ungefaehr mit dem bekannten Oe-Punkte-Wert ueberein?
+
+    samples: Liste von (avg_points, total_points, appearances)
+    Rueckgabe: (bestaetigt, geprueft, treffer)
+
+    Ohne diese Pruefung waere die Einsatz-Gewichtung reines Raten - die
+    Feldnamen stammen aus einem einzigen Rohdaten-Dump.
+    """
+    checked = hits = 0
+    for avg, total, apps in samples:
+        if not (avg and total and apps):
+            continue
+        checked += 1
+        computed = total / apps
+        if avg > 0 and abs(computed - avg) / avg <= tolerance:
+            hits += 1
+    confirmed = checked >= 3 and hits / checked >= 0.7
+    return confirmed, checked, hits
+
+
+def appearance_confidence(appearances):
+    """
+    Wie belastbar ist ein Oe-Punkte-Wert, der auf N Einsaetzen beruht?
+      >= 20 Einsaetze -> 1.00   10-19 -> 0.85   5-9 -> 0.65
+      2-4  -> 0.40              0-1   -> 0.20
+    Unbekannt -> 0.75 (vorsichtige Mitte: weder Bonus noch Ausschluss)
+    """
+    if appearances is None:
+        return 0.75
+    if appearances >= 20:
+        return 1.0
+    if appearances >= 10:
+        return 0.85
+    if appearances >= 5:
+        return 0.65
+    if appearances >= 2:
+        return 0.40
+    return 0.20
 
 def count_by_team(items):
     c = {}
@@ -1183,29 +1252,47 @@ def update_history(player_id, current_mv, history, today_str):
             days = [{"d": "legacy", "mv": entry["mv"]}]
     days = [d for d in days if isinstance(d, dict) and d.get("mv")]
 
+    # Prognose-Pruefung an die tatsaechliche Marktwert-AENDERUNG koppeln,
+    # nicht an den Kalendertagwechsel.
+    #
+    # Grund: Kickbase aktualisiert gegen 22 Uhr deutscher Zeit = 20:00 UTC,
+    # also mitten im UTC-Tag. Beim Tageswechsel (00:00 UTC) hat sich seit dem
+    # letzten Abend-Lauf nichts bewegt -> Vergleich immer null. Die echte
+    # Aenderung passiert dagegen INNERHALB desselben UTC-Tages.
+    #
+    # "predbase" haelt fest, VON WELCHEM Wert aus prognostiziert wurde. Ohne
+    # das wuerde nach einem Tageswechsel gegen den falschen Ausgangswert
+    # gerechnet.
     prediction_check = None
-    if days and days[-1].get("d") != today_str and days[-1].get("pred") is not None:
-        predicted_mv = days[-1]["pred"]
-        prev_mv = days[-1]["mv"]
-        actual_move = current_mv - prev_mv
-        predicted_move = predicted_mv - prev_mv
-        # Wenn sich der Marktwert ueberhaupt nicht bewegt hat, lag zwischen
-        # den beiden Laeufen kein Kickbase-Update (die kommen einmal taeglich
-        # gegen 22 Uhr, nicht zur UTC-Mitternacht). Eine Prognose gegen ein
-        # Nicht-Ereignis zu pruefen wuerde die Trefferquote systematisch
-        # nach unten verzerren - deshalb wird der Vergleich uebersprungen.
-        if actual_move != 0:
+    if days and days[-1].get("pred") is not None:
+        prev_entry = days[-1]
+        base_mv = prev_entry.get("predbase", prev_entry["mv"])
+        if current_mv != base_mv:          # es gab wirklich ein Update
+            predicted_mv = prev_entry["pred"]
             prediction_check = {
                 "predicted_mv": predicted_mv,
                 "actual_mv": current_mv,
-                "predicted_move": predicted_move,
-                "actual_move": actual_move,
+                "predicted_move": predicted_mv - base_mv,
+                "actual_move": current_mv - base_mv,
             }
+            # Verbrauchte Prognose entfernen, damit dieselbe Aenderung nicht
+            # bei mehreren Laeufen mehrfach gewertet wird.
+            prev_entry.pop("pred", None)
+            prev_entry.pop("predbase", None)
 
     if days and days[-1].get("d") == today_str:
         days[-1]["mv"] = current_mv
     else:
-        days.append({"d": today_str, "mv": current_mv})
+        # Noch nicht eingeloeste Prognose samt Bezugswert auf den neuen Tag
+        # uebernehmen - sonst bliebe sie am alten Eintrag haengen und wuerde
+        # nie gegen das abendliche Update gemessen.
+        carried_pred = days[-1].get("pred") if days else None
+        carried_base = days[-1].get("predbase", days[-1].get("mv")) if days else None
+        new_entry = {"d": today_str, "mv": current_mv}
+        if carried_pred is not None:
+            new_entry["pred"] = carried_pred
+            new_entry["predbase"] = carried_base
+        days.append(new_entry)
     days = days[-CONFIG["MV_HISTORY_DAYS"]:]
     history[pid] = {"days": days}
     mvs = [d["mv"] for d in days]
@@ -1215,9 +1302,17 @@ def update_history(player_id, current_mv, history, today_str):
     return [], False, prediction_check
 
 def store_prediction(pid, history, predicted_next_mv):
+    """
+    Merkt sich die Prognose fuer den naechsten Marktwert.
+    "predbase" haelt fest, von welchem Wert aus prognostiziert wurde - noetig,
+    damit der spaetere Vergleich auch dann korrekt rechnet, wenn zwischendurch
+    ein Kalendertag gewechselt hat.
+    """
     pid = str(pid)
     if pid in history and history[pid].get("days"):
-        history[pid]["days"][-1]["pred"] = int(predicted_next_mv)
+        last = history[pid]["days"][-1]
+        last["pred"] = int(predicted_next_mv)
+        last["predbase"] = last["mv"]
 
 def compute_trend(deltas):
     if not deltas:
@@ -1421,11 +1516,17 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
 
     stats = extract_player_stats(detail) if detail else {
         "daily_trend_api": None, "status_code": None, "mdsum": None,
-        "mvt_flag": None, "avg_points": None}
+        "mvt_flag": None, "avg_points": None,
+        "appearances": None, "total_points": None}
     status_code = stats["status_code"]
     kb_daily_trend = stats["daily_trend_api"]
     mdsum = stats["mdsum"]
     avg_points = stats["avg_points"]
+    appearances = stats.get("appearances")
+    total_points_season = stats.get("total_points")
+    # Wie belastbar ist der Oe-Wert? 100 Punkte aus 29 Spielen sind etwas
+    # anderes als 100 aus 2 Spielen.
+    apps_confidence = appearance_confidence(appearances)
 
     deltas, has_real, prediction_check = update_history(pid, mv, history, today_str)
     calculated_trend, _ = compute_trend(deltas)
@@ -1485,10 +1586,17 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     budget_ok = max_bid is None or my_budget is None or max_bid <= my_budget
     relative_value_score = score_relative_value(mv, avg_points, pos_code)
     relative_value_score = confidence_weighted_score(relative_value_score, matchdays_played)
+    # Zusaetzlich nach Einsatzzahl der VORSAISON daempfen: Ein Oe-Wert aus
+    # 2 Spielen ist kein verlaesslicher Massstab, einer aus 29 schon.
+    # Wirkt nur, wenn die Feldzuordnung bestaetigt wurde (siehe unten).
+    if relative_value_score is not None and CONFIG.get("USE_APPEARANCE_WEIGHT"):
+        relative_value_score *= apps_confidence
 
     result = {
         "id": pid, "name": name, "mv": mv, "proj_mv": proj_mv,
         "max_bid": max_bid, "exp_profit": raw_profit,
+        "appearances": appearances, "total_points_season": total_points_season,
+        "apps_confidence": apps_confidence,
         "daily_trend": daily_trend, "kb_trend": kb_daily_trend,
         "momentum": momentum, "has_real": has_real,
         "is_injured": is_injured, "matched_news": matched_news,
@@ -1640,7 +1748,13 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
             for p in verified[:8]:
                 sc = p.get("status_code")
                 status_str = f"{STATUS_ICONS.get(sc, '')} {STATUS_LABELS.get(sc, '?')}" if sc is not None else "❓ Status unbekannt"
-                avg_str = f" · ⚽ Ø {p['avg_points']:.1f} Pkt" if p.get("avg_points") else ""
+                avg_str = ""
+                if p.get("avg_points"):
+                    avg_str = f" · ⚽ Ø {p['avg_points']:.1f} Pkt"
+                    # Einsatzzahl mit anzeigen: 100 Pkt aus 29 Spielen sind
+                    # etwas anderes als 100 aus 2 Spielen.
+                    if p.get("appearances"):
+                        avg_str += f" ({p['appearances']} Einsätze)"
                 rv = p.get("relative_value_score")
                 rv_str = f" · 💎 Wert +{rv:.2f}" if rv is not None and rv > 0 else ""
                 trend_str = f" · 📈 {fmt_profit(p['kb_trend'])} €/Tag" if p.get("kb_trend") is not None else ""
@@ -1825,6 +1939,33 @@ def main():
     cash_by_name = {row["name"]: row for row in cash_debug_rows}
 
     win_probs = get_bundesliga_odds()
+    # --- Feldzuordnung fuer Einsatzzahlen gegenpruefen ---
+    # Die Felder "smdc"/"stud" sind Kandidaten aus einem einzelnen Rohdump.
+    # Bevor sie die Bewertung beeinflussen, wird an einer Stichprobe geprueft,
+    # ob total_points/appearances ungefaehr den bekannten Oe-Punkten entspricht.
+    apps_samples = []
+    for p in [x for x in all_market if is_free_market_player(x)][:6]:
+        pid_probe = p.get("id", p.get("i"))
+        market_ap = p.get("ap")
+        if not pid_probe or not isinstance(market_ap, (int, float)) or market_ap <= 0:
+            continue
+        d = get_player_detail(token, league_id, pid_probe)
+        s = extract_player_stats(d)
+        apps_samples.append((float(market_ap), s.get("total_points"), s.get("appearances")))
+        time.sleep(0.2)
+
+    confirmed, checked, hits = verify_appearance_mapping(apps_samples)
+    CONFIG["USE_APPEARANCE_WEIGHT"] = confirmed
+    if checked == 0:
+        print("Einsatz-Gewichtung: keine pruefbaren Daten -> inaktiv")
+    elif confirmed:
+        print(f"Einsatz-Gewichtung AKTIV: Feldzuordnung bestaetigt ({hits}/{checked} Stichproben stimmen)")
+    else:
+        print(f"Einsatz-Gewichtung inaktiv: Zuordnung unbestaetigt ({hits}/{checked} Stichproben stimmen)")
+        for ap, tp, apps in apps_samples[:3]:
+            calc = f"{tp/apps:.0f}" if (tp and apps) else "?"
+            print(f"   Probe: Oe={ap:.0f} | Gesamtpunkte={tp} | Einsaetze={apps} | berechnet={calc}")
+
     fixture_cache, unmapped = {}, set()
 
     evaluated = []
