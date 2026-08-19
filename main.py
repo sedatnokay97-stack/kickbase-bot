@@ -1445,9 +1445,51 @@ def format_accuracy_line(acc):
         parts.append(f"   📐 {hinweis}")
     return "\n".join(parts)
 
-STATUS_ICONS = {0: "🔵", 1: "🟢", 2: "🟡", 3: "🟠", 4: "🔴"}
-STATUS_LABELS = {0: "garantiert", 1: "sicher", 2: "Rotation", 3: "unwahrscheinlich", 4: "bank/keine Chance"}
-STATUS_FACTORS = {0: 1.15, 1: 1.10, 2: 1.00, 3: 0.90, 4: 0.75}
+# Beschriftung exakt nach der Legende der Kickbase-App:
+#   Sicher / Erwartet / Unsicher / Unwahrscheinlich / Ausgeschlossen
+# ACHTUNG: Welche Zahl welcher Stufe entspricht, ist aus Rohdaten abgeleitet
+# und nicht dokumentiert. diagnose_status_values() gibt eine Stichprobe ins
+# Log, damit sich das gegen die App gegenpruefen laesst.
+STATUS_ICONS = {0: "🔵", 1: "🟢", 2: "🟠", 3: "🔴", 4: "⚫"}
+STATUS_LABELS = {0: "Sicher", 1: "Erwartet", 2: "Unsicher",
+                 3: "Unwahrscheinlich", 4: "Ausgeschlossen"}
+STATUS_FACTORS = {0: 1.15, 1: 1.10, 2: 1.00, 3: 0.90, 4: 0.70}
+
+
+def get_status_code(player, detail_stats=None):
+    """
+    Startelf-Status ermitteln.
+
+    Wichtig: "prob" steht bereits in den MARKTDATEN jedes Spielers - die
+    Detail-Abfrage wird nur fuer freie Spieler gemacht. Wer den Status nur
+    aus dem Detail liest, bekommt bei allen uebrigen Spielern faelschlich
+    "unbekannt", obwohl der Wert direkt vorliegt.
+    """
+    if detail_stats and detail_stats.get("status_code") is not None:
+        return detail_stats["status_code"]
+    v = player.get("prob")
+    if isinstance(v, int) and 0 <= v <= 4:
+        return v
+    return None
+
+
+def diagnose_status_values(players, limit=8):
+    """
+    Listet Name + Rohwert des Startelf-Status, damit sich die Zuordnung
+    gegen die App pruefen laesst (Legende: 0=Sicher ... 4=Ausgeschlossen).
+    """
+    rows = []
+    for p in players:
+        v = p.get("prob")
+        if isinstance(v, int):
+            rows.append((p.get("n") or p.get("pn") or "?", v))
+        if len(rows) >= limit:
+            break
+    if rows:
+        txt = ", ".join(f"{n}={v}" for n, v in rows)
+        print(f"🔬 Startelf-Rohwerte (zum Abgleich mit der App): {txt}")
+    else:
+        print("🔬 Startelf-Rohwerte: kein 'prob'-Feld in den Marktdaten gefunden")
 
 def lineup_factor_from_status(status_code):
     return STATUS_FACTORS.get(status_code, 1.0)
@@ -1518,7 +1560,9 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
         "daily_trend_api": None, "status_code": None, "mdsum": None,
         "mvt_flag": None, "avg_points": None,
         "appearances": None, "total_points": None}
-    status_code = stats["status_code"]
+    # Status aus Detail ODER Marktdaten - "prob" liegt in beiden vor,
+    # aber die Detail-Abfrage laeuft nur fuer freie Spieler.
+    status_code = get_status_code(player, stats)
     kb_daily_trend = stats["daily_trend_api"]
     mdsum = stats["mdsum"]
     avg_points = stats["avg_points"]
@@ -1621,8 +1665,12 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
     lines.append(f"⚽ Kickbase Markt-Report — noch {days_left} Tage")
     if my_budget is not None:
         lines.append(f"💳 Budget: {fmt_money(my_budget)} €")
-    if not lineups_ok:
-        lines.append("⚠️ Startelf-Daten nicht verfügbar.")
+    # Startelf-Warnung nur, wenn tatsaechlich kein einziger Spieler einen
+    # Status hat. Frueher war das fest auf "nicht verfuegbar" gesetzt (Relikt
+    # aus der Zeit, als LigaInsider die Quelle war) - inzwischen liefert
+    # Kickbase den Status selbst ueber "prob".
+    if not any(p.get("status_code") is not None for p in evaluated):
+        lines.append("⚠️ Startelf-Daten aktuell nicht verfügbar.")
     if not odds_ok:
         lines.append("⚠️ Wettquoten nicht verfügbar (ODDS_API_KEY prüfen).")
 
@@ -1753,8 +1801,11 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                     avg_str = f" · ⚽ Ø {p['avg_points']:.1f} Pkt"
                     # Einsatzzahl mit anzeigen: 100 Pkt aus 29 Spielen sind
                     # etwas anderes als 100 aus 2 Spielen.
-                    if p.get("appearances"):
-                        avg_str += f" ({p['appearances']} Einsätze)"
+                    # Nur anzeigen, wenn die Feldzuordnung gegengeprueft wurde -
+                    # sonst stuende dort eine Zahl, die nichts bedeutet.
+                    if CONFIG.get("USE_APPEARANCE_WEIGHT") and p.get("appearances"):
+                        n_app = p["appearances"]
+                        avg_str += f" ({n_app} Einsatz{'' if n_app == 1 else 'e'})"
                 rv = p.get("relative_value_score")
                 rv_str = f" · 💎 Wert +{rv:.2f}" if rv is not None and rv > 0 else ""
                 trend_str = f" · 📈 {fmt_profit(p['kb_trend'])} €/Tag" if p.get("kb_trend") is not None else ""
@@ -1939,6 +1990,8 @@ def main():
     cash_by_name = {row["name"]: row for row in cash_debug_rows}
 
     win_probs = get_bundesliga_odds()
+    diagnose_status_values(all_market)
+
     # --- Feldzuordnung fuer Einsatzzahlen gegenpruefen ---
     # Die Felder "smdc"/"stud" sind Kandidaten aus einem einzelnen Rohdump.
     # Bevor sie die Bewertung beeinflussen, wird an einer Stichprobe geprueft,
