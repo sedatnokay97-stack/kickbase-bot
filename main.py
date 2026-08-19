@@ -360,11 +360,15 @@ def get_my_team_counts(token, league_id, my_manager_id):
 # ==========================================
 def assess_competition(pos_code, opponent_profiles, cash_by_name, price_threshold):
     """
-    Findet Konkurrenten, die (a) diese Position brauchen UND (b) laut
-    Cash-Schaetzung genug Geld haben, um realistisch mitzubieten.
-    Nur eine Untergrenze (siehe build_opponent_cash_tracker) - Konkurrenten
-    koennen tatsaechlich mehr Cash haben als hier geschaetzt, nie weniger
-    fuer diesen Zweck relevant weniger.
+    Findet Konkurrenten, die diese Position brauchen, sortiert nach
+    geschaetztem Cash (staerkster zuerst).
+
+    WICHTIG zur Interpretation: min_cash ist eine UNTERGRENZE (Startkapital +
+    Boni - bekannte Kaeufe, ohne Verkaufserloese). Daraus folgt:
+    - "Rivale kann dich ueberbieten" ist sicher, wenn min_cash > dein Limit.
+    - "Rivale kann NICHT mitbieten" ist NIE sicher, weil er mehr haben kann
+      als die Untergrenze zeigt. Deshalb wird das bewusst nie behauptet.
+    Rueckgabe: Liste von (name, min_cash), absteigend nach min_cash.
     """
     if pos_code is None:
         return []
@@ -374,29 +378,36 @@ def assess_competition(pos_code, opponent_profiles, cash_by_name, price_threshol
             continue
         cash_info = cash_by_name.get(prof["name"])
         min_cash = cash_info["min_cash"] if cash_info else None
-        if min_cash is not None and min_cash >= price_threshold:
-            competitors.append(prof["name"])
+        competitors.append((prof["name"], min_cash))
+    competitors.sort(key=lambda x: (x[1] is None, -(x[1] or 0)))
     return competitors
 
 def build_deep_analysis(p, my_gap_codes, competitors):
     """
-    Verbindet Signale zu einer zusammenhaengenden Einschaetzung - reine
-    Code-Logik, kein LLM-Aufruf. Zeigt bewusst NUR, was die Extras-Zeile
-    darueber noch nicht sagt (Status/Restprogramm stehen dort schon als
-    Icons) - sonst wiederholt sich die Nachricht nur selbst.
-    Aendert nichts an Kategorie/Sortierung/max_bid.
+    Verbindet Signale zu einer Einschaetzung - reine Code-Logik, kein LLM.
+    Zeigt bewusst NUR, was die Extras-Zeile darueber noch nicht sagt.
     """
     parts = []
     pos_code = p.get("pos_code")
-    if pos_code is not None and pos_code in (my_gap_codes or []):
-        parts.append(f"füllt deine eigene Lücke auf {POSITION_NAMES.get(pos_code, pos_code)}")
+    pos_name = POSITION_NAMES.get(pos_code, pos_code)
 
-    if competitors:
-        names = ", ".join(competitors[:3])
-        extra = f" +{len(competitors)-3} weitere" if len(competitors) > 3 else ""
-        parts.append(f"⚠️ {len(competitors)} Konkurrent(en) mit Bedarf & Budget ({names}{extra}) — rechne mit Gegenwehr")
+    if pos_code is not None and pos_code in (my_gap_codes or []):
+        parts.append(f"füllt deine eigene Lücke auf {pos_name}")
+
+    max_bid = p.get("max_bid")
+    if not competitors:
+        parts.append(f"kein Rivale mit Bedarf auf {pos_name}")
     else:
-        parts.append("kein erkennbarer Konkurrenzdruck auf diese Position")
+        top_name, top_cash = competitors[0]
+        if top_cash is not None and max_bid is not None and top_cash > max_bid:
+            # Sichere Aussage: Untergrenze liegt bereits ueber deinem Limit
+            parts.append(
+                f"⚠️ {top_name} braucht {pos_name} und hat mind. {fmt_money(top_cash)} "
+                f"— kann dein Limit von {fmt_money(max_bid)} überbieten"
+            )
+        else:
+            others = f" (+{len(competitors)-1} weitere)" if len(competitors) > 1 else ""
+            parts.append(f"{len(competitors)} Rivale(n) mit Bedarf auf {pos_name}: {top_name}{others}")
 
     return " · ".join(parts) if parts else None
 
@@ -1102,11 +1113,16 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                 lines.append(f"  🧠 {esc(p['deep_analysis'])}")
 
     if detail_list:
-        lines.append("\n🔥 BESTE CHANCEN (nach erwartetem Gewinn)")
-        for i, p in enumerate(detail_list, start=1):
+        # Top und Watch getrennt ausgeben: sonst sieht ein wegen Bank-Status
+        # herabgestufter Spieler durch die durchlaufende Nummerierung trotzdem
+        # aus wie eine Top-Empfehlung.
+        detail_top = [p for p in detail_list if p["category"] == "top"]
+        detail_watch = [p for p in detail_list if p["category"] == "watch"]
+
+        def render_candidate(p, label):
             momentum_icon = " 🚀" if p["momentum"] == "beschleunigt" else (" 📉" if p["momentum"] == "verlangsamt" else "")
             lines.append(
-                f"\n{i}. {esc(p['name'])} — {fmt_money(p['mv'])} €{momentum_icon}\n"
+                f"\n{label} {esc(p['name'])} — {fmt_money(p['mv'])} €{momentum_icon}\n"
                 f"   Erwartet: {fmt_money(p['proj_mv'])} € ({fmt_profit(p['exp_profit'])} €)\n"
                 f"   👉 Max. Gebot: {fmt_money(p['max_bid'])} €"
             )
@@ -1129,6 +1145,16 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                 lines.append(f"   📰 {esc(h[:120])}")
             if p.get("deep_analysis"):
                 lines.append(f"   🧠 {esc(p['deep_analysis'])}")
+
+        if detail_top:
+            lines.append("\n🔥 BESTE CHANCEN (sicherer Einsatz + hoher Gewinn)")
+            for i, p in enumerate(detail_top, start=1):
+                render_candidate(p, f"{i}.")
+
+        if detail_watch:
+            lines.append("\n📋 ZWEITE REIHE (Trend gut, aber mit Vorbehalt)")
+            for p in detail_watch:
+                render_candidate(p, "•")
     else:
         lines.append("\n😐 Keine lohnenden Kaufchancen gefunden.")
 
