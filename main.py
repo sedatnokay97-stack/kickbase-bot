@@ -403,6 +403,7 @@ def summarize_transfers(transfers):
         if len(e["players"]) < 3:
             e["players"].append(t["player"])
     return summary
+    
 LEAGUE_START_DATE = date(2026, 8, 15)
 OPPONENT_START_CASH = 50_000_000
 
@@ -459,6 +460,7 @@ def print_cash_debug(cash_rows):
             f"| Käufe -{fmt_money(row['known_buy_total'])} "
             f"({row['known_buy_count']}×)"
         )
+
 def get_bundesliga_odds():
     if not ODDS_API_KEY:
         print("ℹ️ Kein ODDS_API_KEY - Wettquoten-Feature inaktiv.")
@@ -1212,11 +1214,13 @@ def main():
     transfers = parse_feed(feed_items)
     transfer_summary = summarize_transfers(transfers)
     print(f"Transfers im Feed: {len(transfers)}")
-cash_debug_rows = build_opponent_cash_tracker(
-    opponent_profiles,
-    transfer_summary,
-)
-print_cash_debug(cash_debug_rows)
+
+    cash_debug_rows = build_opponent_cash_tracker(
+        opponent_profiles,
+        transfer_summary,
+    )
+    print_cash_debug(cash_debug_rows)
+
     win_probs = get_bundesliga_odds()
     fixture_cache, unmapped = {}, set()
     today_str = datetime.now(timezone.utc).date().isoformat()
