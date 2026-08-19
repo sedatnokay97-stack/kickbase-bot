@@ -350,6 +350,8 @@ def analyze_opponents(token, league_id, ranking_res, my_manager_id,
         squad = get_squad(token, league_id, uid)
         if not squad:
             continue
+        if not squads:          # nur beim ersten Kader ausgeben
+            diagnose_squad_fields(squad, "Gegner-Kader")
         squads.append(squad)
 
         if history is not None and today_str:
@@ -600,13 +602,84 @@ def summarize_transfers(transfers):
 # ==========================================
 # VERKAUFSERKENNUNG UEBER KADER-DIFFERENZ
 # ==========================================
+def migrate_transfer_store(history):
+    """
+    Bereinigt doppelte Transfer-Eintraege.
+
+    HINTERGRUND: Als das Verkaufs-Parsing dazukam, aenderte sich das
+    Schluesselschema von "<feedid>" auf "<feedid>|buy" bzw. "<feedid>|sell".
+    Alte Eintraege wurden dadurch nicht mehr als Duplikat erkannt und
+    derselbe Kauf zaehlte doppelt - das verfaelscht die Cash-Schaetzung
+    massiv (bei MR_2606 waren es 69,4 statt 34,7 Mio).
+
+    Diese Funktion vereinheitlicht alle Schluessel auf das neue Schema und
+    entfernt Doppelungen. Laeuft bei jedem Start, ist aber nach der ersten
+    Bereinigung wirkungslos.
+    Rueckgabe: Anzahl entfernter Duplikate.
+    """
+    store = history.get("_transfers")
+    if not isinstance(store, dict):
+        return 0
+
+    normalized = {}
+    removed = 0
+    for key, entry in store.items():
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get("kind", "buy")
+        manager = entry.get("manager") or entry.get("buyer")
+        if not manager:
+            continue
+        base = key.split("|")[0]
+        canonical = f"{base}|{kind}"
+        clean = {
+            "kind": kind,
+            "manager": manager,
+            "player": entry.get("player"),
+            "price": entry.get("price"),
+            "date": entry.get("date"),
+        }
+        if canonical in normalized:
+            removed += 1
+            continue
+        normalized[canonical] = clean
+
+    history["_transfers"] = normalized
+    return removed
+
+
+def diagnose_squad_fields(squad, label="Kader"):
+    """
+    Zeigt einmalig die Feldnamen eines Kader-Eintrags.
+    Noetig, weil snapshot_squad() bisher leere Schnappschuesse erzeugt hat -
+    die erwarteten Felder (id/i + mv/m) passen offenbar nicht.
+    """
+    if not squad:
+        print(f"🔬 {label}: leer")
+        return
+    first = squad[0]
+    if isinstance(first, dict):
+        print(f"🔬 {label}-Felder: {sorted(first.keys())}")
+        probe = {k: first.get(k) for k in ("i", "id", "mv", "m", "n", "pos") if k in first}
+        print(f"🔬 {label}-Beispielwerte: {probe}")
+
+
 def snapshot_squad(squad):
-    """Reduziert einen Kader auf {spieler_id: marktwert} fuer den Vergleich."""
+    """
+    Reduziert einen Kader auf {spieler_id: marktwert}.
+    Breitere Feldnamen-Suche als zuvor - die enge Variante lieferte in der
+    Praxis nur leere Schnappschuesse.
+    """
     snap = {}
+    id_keys = ("i", "id", "pi", "playerId")
+    mv_keys = ("mv", "m", "cv", "marketValue")
     for p in squad:
-        pid = p.get("id") or p.get("i")
-        mv = p.get("mv") or p.get("m")
-        if pid and isinstance(mv, (int, float)) and mv > 0:
+        if not isinstance(p, dict):
+            continue
+        pid = next((p[k] for k in id_keys if p.get(k)), None)
+        mv = next((p[k] for k in mv_keys
+                   if isinstance(p.get(k), (int, float)) and p[k] > 0), None)
+        if pid and mv:
             snap[str(pid)] = int(mv)
     return snap
 
@@ -1116,12 +1189,18 @@ def update_history(player_id, current_mv, history, today_str):
         prev_mv = days[-1]["mv"]
         actual_move = current_mv - prev_mv
         predicted_move = predicted_mv - prev_mv
-        prediction_check = {
-            "predicted_mv": predicted_mv,
-            "actual_mv": current_mv,
-            "predicted_move": predicted_move,
-            "actual_move": actual_move,
-        }
+        # Wenn sich der Marktwert ueberhaupt nicht bewegt hat, lag zwischen
+        # den beiden Laeufen kein Kickbase-Update (die kommen einmal taeglich
+        # gegen 22 Uhr, nicht zur UTC-Mitternacht). Eine Prognose gegen ein
+        # Nicht-Ereignis zu pruefen wuerde die Trefferquote systematisch
+        # nach unten verzerren - deshalb wird der Vergleich uebersprungen.
+        if actual_move != 0:
+            prediction_check = {
+                "predicted_mv": predicted_mv,
+                "actual_mv": current_mv,
+                "predicted_move": predicted_move,
+                "actual_move": actual_move,
+            }
 
     if days and days[-1].get("d") == today_str:
         days[-1]["mv"] = current_mv
@@ -1692,6 +1771,11 @@ def main():
     print(f"{len(headlines)} Schlagzeilen, {len(injured)} Verletzten-Eintraege.")
 
     history, history_sha = load_history()
+    removed = migrate_transfer_store(history)
+    if removed:
+        print(f"🧹 Transfer-Speicher bereinigt: {removed} doppelte Eintraege entfernt "
+              f"(Kaeufe wurden zuvor doppelt gezaehlt)")
+
     my_budget = get_my_budget(token, league_id)
     print(f"Budget: {fmt_money(my_budget)}" if my_budget else "Budget unbekannt.")
 
