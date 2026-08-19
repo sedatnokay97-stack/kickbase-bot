@@ -1212,7 +1212,7 @@ def main():
     transfers = parse_feed(feed_items)
     transfer_summary = summarize_transfers(transfers)
     print(f"Transfers im Feed: {len(transfers)}")
-    cash_debug_rows = build_opponent_cash_tracker(
+cash_debug_rows = build_opponent_cash_tracker(
     opponent_profiles,
     transfer_summary,
 )
