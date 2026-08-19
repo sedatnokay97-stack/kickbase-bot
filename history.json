@@ -1488,6 +1488,97 @@
       "player": "Kuruçay",
       "price": 13095783,
       "date": "2026-08-18T21:00:50Z"
+    },
+    "12317604472|sell": {
+      "kind": "sell",
+      "manager": "MR_2606",
+      "player": "Millgramm",
+      "price": 6748792,
+      "date": "2026-08-19T06:54:18Z"
+    },
+    "12317291806|buy": {
+      "kind": "buy",
+      "manager": "MR_2606",
+      "player": "Hack",
+      "price": 11200001,
+      "date": "2026-08-19T06:19:14Z"
+    },
+    "12316997188|buy": {
+      "kind": "buy",
+      "manager": "El Meiers 95",
+      "player": "Machino",
+      "price": 3333330,
+      "date": "2026-08-19T05:47:08Z"
+    },
+    "12316825936|buy": {
+      "kind": "buy",
+      "manager": "schalkerboy77",
+      "player": "Schmahl",
+      "price": 5812222,
+      "date": "2026-08-19T05:29:48Z"
+    },
+    "12316051243|sell": {
+      "kind": "sell",
+      "manager": "El Meiers 95",
+      "player": "Gendrey",
+      "price": 4213224,
+      "date": "2026-08-19T04:11:34Z"
+    },
+    "12315703402|buy": {
+      "kind": "buy",
+      "manager": "MR_2606",
+      "player": "Futkeu",
+      "price": 11000001,
+      "date": "2026-08-19T03:30:02Z"
+    },
+    "12313074991|sell": {
+      "kind": "sell",
+      "manager": "Gigi",
+      "player": "Nsoki",
+      "price": 5215573,
+      "date": "2026-08-18T21:42:45Z"
+    },
+    "12312975760|buy": {
+      "kind": "buy",
+      "manager": "El Meiers 95",
+      "player": "Mwene",
+      "price": 8000020,
+      "date": "2026-08-18T21:28:55Z"
+    },
+    "12312924316|buy": {
+      "kind": "buy",
+      "manager": "MR_2606",
+      "player": "Remberg",
+      "price": 12500001,
+      "date": "2026-08-18T21:22:17Z"
+    },
+    "12312786157|sell": {
+      "kind": "sell",
+      "manager": "MarvinKulas",
+      "player": "Baldé",
+      "price": 500000,
+      "date": "2026-08-18T21:04:03Z"
+    },
+    "12312754150|buy": {
+      "kind": "buy",
+      "manager": "MarvinKulas",
+      "player": "Kuruçay",
+      "price": 13095783,
+      "date": "2026-08-18T21:00:50Z"
+    },
+    "12312426922|sell": {
+      "kind": "sell",
+      "manager": "MarvinKulas",
+      "player": "Bøving",
+      "price": 5228519,
+      "date": "2026-08-18T20:23:54Z"
+    },
+    "12311613568|sell": {
+      "kind": "sell",
+      "manager": "schalkerboy77",
+      "player": "Santos",
+      "price": 10285500,
+      "date": "2026-08-18T18:46:15Z"
     }
   },
   "_squads": {
