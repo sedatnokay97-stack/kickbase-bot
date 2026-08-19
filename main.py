@@ -336,14 +336,30 @@ def missing_position_codes(pos_counts):
     return [p for p, n in POSITION_MIN_NEEDED.items() if pos_counts.get(p, 0) < n]
 
 def analyze_opponents(token, league_id, ranking_res, my_manager_id,
-                      league_start_budget=None):
-    blocked, profiles = {}, []
+                      league_start_budget=None, history=None, today_str=None):
+    """
+    Rueckgabe: (blocked_teams, profiles, squads)
+    Erkennt beim Kader-Abruf gleich Verkaeufe ueber die Differenz zum letzten
+    gespeicherten Kaderstand - dafuer werden history und today_str gebraucht.
+    """
+    blocked, profiles, squads = {}, [], []
+    total_sales = 0
     for uid, name in extract_league_users(ranking_res):
         if str(uid) == str(my_manager_id):
             continue
         squad = get_squad(token, league_id, uid)
         if not squad:
             continue
+        squads.append(squad)
+
+        if history is not None and today_str:
+            sales = detect_sales(name, squad, history, today_str)
+            if sales:
+                total_sales += len(sales)
+                summe = sum(s["value"] for s in sales)
+                print(f"💸 {name}: {len(sales)} Verkauf/Verkäufe erkannt "
+                      f"(~{fmt_money(summe)} geschätzt)")
+
         for tid, cnt in count_by_team(squad).items():
             if cnt >= CONFIG["MAX_PER_TEAM"]:
                 blocked.setdefault(tid, []).append(name)
@@ -354,8 +370,9 @@ def analyze_opponents(token, league_id, ranking_res, my_manager_id,
             "missing_positions": missing_position_codes(pc),
         })
         time.sleep(CONFIG["OPPONENT_FETCH_SLEEP"])
-    print(f"🕵️ Konkurrenten analysiert: {len(profiles)}")
-    return blocked, profiles
+    print(f"🕵️ Konkurrenten analysiert: {len(profiles)}"
+          + (f", {total_sales} Verkäufe in diesem Lauf erkannt" if total_sales else ""))
+    return blocked, profiles, squads
 
 def get_my_team_counts(token, league_id, my_manager_id):
     if not my_manager_id:
@@ -376,6 +393,19 @@ def assess_competition(pos_code, opponent_profiles, cash_by_name, price_threshol
     return competitors
 
 def build_deep_analysis(p, my_gap_codes, competitors):
+    """
+    Bewusst zurueckhaltend: Vor Spieltag 1 haben praktisch alle Konkurrenten
+    genug Cash, um jedes Gebot zu ueberbieten. Eine Warnung, die bei JEDEM
+    Spieler steht, ist kein Signal mehr, sondern Rauschen - und lenkt vom
+    Wesentlichen ab.
+
+    Ausgegeben wird deshalb nur, was tatsaechlich unterscheidet:
+      - eigene Kaderluecke (immer relevant)
+      - unkontestierte Position (echte gute Nachricht)
+      - Rivale, dessen Cash-Untergrenze bereits unter deinem Limit liegt
+        (wird erst im Saisonverlauf relevant, wenn Konten leerer werden)
+    Der Normalfall "Rivalen vorhanden, alle koennen zahlen" bleibt still.
+    """
     parts = []
     pos_code = p.get("pos_code")
     pos_name = POSITION_NAMES.get(pos_code, pos_code)
@@ -384,18 +414,20 @@ def build_deep_analysis(p, my_gap_codes, competitors):
         parts.append(f"füllt deine eigene Lücke auf {pos_name}")
 
     max_bid = p.get("max_bid")
-    if not competitors:
-        parts.append(f"kein Rivale mit Bedarf auf {pos_name}")
-    else:
-        top_name, top_cash = competitors[0]
-        if top_cash is not None and max_bid is not None and top_cash > max_bid:
-            parts.append(
-                f"⚠️ {top_name} braucht {pos_name} und hat mind. {fmt_money(top_cash)} "
-                f"— kann dein Limit von {fmt_money(max_bid)} überbieten"
-            )
-        else:
-            others = f" (+{len(competitors)-1} weitere)" if len(competitors) > 1 else ""
-            parts.append(f"{len(competitors)} Rivale(n) mit Bedarf auf {pos_name}: {top_name}{others}")
+    if pos_code is not None:
+        if not competitors:
+            parts.append(f"✅ kein Rivale mit Bedarf auf {pos_name} — wenig Gegenwehr erwartet")
+        elif max_bid is not None:
+            # Nur melden, wenn ALLE Bedarfstraeger unter deinem Limit liegen -
+            # dann ist es ein echter Vorteil und keine Standardaussage.
+            tight = [(n, c) for n, c in competitors if c is not None and c < max_bid]
+            if tight and len(tight) == len(competitors):
+                names = ", ".join(n for n, _ in tight[:2])
+                parts.append(
+                    f"💡 alle Rivalen mit Bedarf auf {pos_name} liegen unter deinem Limit "
+                    f"({names}) — Cash-Vorteil möglich"
+                )
+            # Standardfall: bewusst keine Ausgabe
 
     return " · ".join(parts) if parts else None
 
@@ -511,6 +543,82 @@ def summarize_transfers(transfers):
 
 
 # ==========================================
+# VERKAUFSERKENNUNG UEBER KADER-DIFFERENZ
+# ==========================================
+def snapshot_squad(squad):
+    """Reduziert einen Kader auf {spieler_id: marktwert} fuer den Vergleich."""
+    snap = {}
+    for p in squad:
+        pid = p.get("id") or p.get("i")
+        mv = p.get("mv") or p.get("m")
+        if pid and isinstance(mv, (int, float)) and mv > 0:
+            snap[str(pid)] = int(mv)
+    return snap
+
+
+def detect_sales(manager_name, current_squad, history, today_str):
+    """
+    Erkennt Verkaeufe, indem der aktuelle Kader mit dem letzten gespeicherten
+    verglichen wird. Ein Spieler kann einen Kader nur durch Verkauf verlassen,
+    daher gilt: verschwunden = verkauft.
+
+    Der Erloes wird mit dem zuletzt bekannten Marktwert geschaetzt. Das ist
+    eine Naeherung:
+      - Verkauf an Kickbase  -> exakt der Marktwert
+      - Verkauf an Mitmanager -> meist Marktwert + Aufschlag, also eher zu niedrig
+    Die Schaetzung ist damit konservativ (unterschaetzt eher), was zur
+    Logik der Cash-UNTERGRENZE passt.
+
+    Rueckgabe: Liste erkannter Verkaeufe fuer diesen Lauf.
+    """
+    squads_store = history.setdefault("_squads", {})
+    sales_store = history.setdefault("_sales", {})
+
+    current_snap = snapshot_squad(current_squad)
+    previous = squads_store.get(manager_name, {}).get("players", {})
+
+    new_sales = []
+    if previous:   # beim allerersten Lauf gibt es nichts zu vergleichen
+        for pid, last_mv in previous.items():
+            if pid not in current_snap:
+                new_sales.append({"player_id": pid, "value": last_mv, "date": today_str})
+
+    if new_sales:
+        entry = sales_store.setdefault(manager_name, {"count": 0, "total": 0})
+        for s in new_sales:
+            entry["count"] += 1
+            entry["total"] += s["value"]
+
+    # Aktuellen Stand fuer den naechsten Vergleich sichern
+    squads_store[manager_name] = {"players": current_snap, "date": today_str}
+    return new_sales
+
+
+def get_sales_summary(history):
+    """Kumulierte Verkaufserloese je Manager aus dem Verlauf."""
+    return history.get("_sales", {})
+
+
+def diagnose_feed_types(feed_items, max_samples=4):
+    """
+    Schluesselt die vorkommenden Feed-Typen auf und zeigt je einen Beispiel-
+    Eintrag. Damit laesst sich spaeter der exakte Verkaufs-Eintrag
+    identifizieren und die Schaetzung durch echte Zahlen ersetzen.
+    """
+    by_type = {}
+    for item in feed_items:
+        if not isinstance(item, dict):
+            continue
+        t = item.get("t")
+        if t not in by_type:
+            by_type[t] = item
+    print(f"🔬 FEED-TYPEN: {sorted(str(k) for k in by_type)}")
+    for t, sample in list(by_type.items())[:max_samples]:
+        data_keys = sorted((sample.get("data") or {}).keys()) if isinstance(sample.get("data"), dict) else []
+        print(f"🔬   Typ {t}: data-Felder = {data_keys}")
+
+
+# ==========================================
 # ROTIERENDER CRAWLER
 # ==========================================
 def collect_known_player_ids(all_market, squads, history=None):
@@ -605,22 +713,35 @@ def cumulative_login_bonus_per_player(today=None):
 
     return 450_000 + (days - 9) * 100_000
 
-def build_opponent_cash_tracker(opponent_profiles, transfer_summary, today=None):
+def build_opponent_cash_tracker(opponent_profiles, transfer_summary, today=None,
+                                 sales_summary=None):
+    """
+    Cash-Schaetzung: Startkapital + Login-Boni - Kaeufe + geschaetzte Verkaufserloese.
+
+    Verkaufserloese stammen aus der Kader-Differenz (detect_sales) und sind mit
+    dem letzten bekannten Marktwert bewertet. Bei Verkaeufen an Mitmanager liegt
+    der echte Erloes meist hoeher, die Schaetzung bleibt also konservativ.
+    """
     bonus_per_player = cumulative_login_bonus_per_player(today)
+    sales_summary = sales_summary or {}
     rows = []
 
     for profile in opponent_profiles:
         name = profile["name"]
         squad_size = profile["squad_size"]
-        buys = transfer_summary.get(name, {"count": 0, "total": 0})
+        buys = (transfer_summary or {}).get(name, {"count": 0, "total": 0})
+        sells = sales_summary.get(name, {"count": 0, "total": 0})
         login_bonus = bonus_per_player * squad_size
-        min_cash = OPPONENT_START_CASH + login_bonus - buys["total"]
+        min_cash = (OPPONENT_START_CASH + login_bonus
+                    - buys["total"] + sells["total"])
 
         rows.append({
             "name": name,
             "squad_size": squad_size,
             "known_buy_count": buys["count"],
             "known_buy_total": buys["total"],
+            "known_sell_count": sells["count"],
+            "known_sell_total": sells["total"],
             "login_bonus": login_bonus,
             "min_cash": min_cash,
         })
@@ -628,15 +749,20 @@ def build_opponent_cash_tracker(opponent_profiles, transfer_summary, today=None)
     return rows
 
 def print_cash_debug(cash_rows):
-    print("\n💰 CASH DEBUG — Untergrenze ohne bestätigte Verkaufserlöse")
+    print("\n💰 CASH DEBUG — Start + Boni - Käufe + geschätzte Verkäufe")
 
     for row in sorted(cash_rows, key=lambda item: item["min_cash"]):
+        sell_part = ""
+        if row.get("known_sell_count"):
+            sell_part = (f" | Verkäufe +{fmt_money(row['known_sell_total'])} "
+                         f"({row['known_sell_count']}×)")
         print(
-            f"• {row['name']}: Cash ≥ {fmt_money(row['min_cash'])} "
+            f"• {row['name']}: Cash ≈ {fmt_money(row['min_cash'])} "
             f"| Start 50,0 Mio "
             f"| Boni +{fmt_money(row['login_bonus'])} "
             f"| Käufe -{fmt_money(row['known_buy_total'])} "
             f"({row['known_buy_count']}×)"
+            f"{sell_part}"
         )
 
 def get_bundesliga_odds():
@@ -1326,23 +1452,22 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
 
     if opponent_profiles:
         lines.append("\n🕵️ Konkurrenz-Radar")
-        cash_by_name = {
-            row["name"]: row
-            for row in build_opponent_cash_tracker(
-                opponent_profiles,
-                transfer_summary,
-            )
-        }
+        # Bereits in main() berechnete Werte verwenden - die enthalten die
+        # Verkaufserloese. Neu berechnen wuerde die wieder verlieren.
+        radar_cash = cash_by_name or {}
 
         for prof in sorted(opponent_profiles, key=lambda x: x["squad_size"]):
             gaps = ", ".join(prof["gaps"]) if prof["gaps"] else "vollständig"
-            cash = cash_by_name.get(prof["name"])
+            cash = radar_cash.get(prof["name"])
             cash_text = ""
 
             if cash:
+                sell_txt = ""
+                if cash.get("known_sell_count"):
+                    sell_txt = f" · Verkäufe {cash['known_sell_count']}×"
                 cash_text = (
-                    f" · Cash ≥ {fmt_money(cash['min_cash'])} €"
-                    f" · Käufe {cash['known_buy_count']}×"
+                    f" · Cash ≈ {fmt_money(cash['min_cash'])} €"
+                    f" · Käufe {cash['known_buy_count']}×{sell_txt}"
                 )
 
             lines.append(
@@ -1435,29 +1560,33 @@ def main():
 
     ranking_res = get_ranking(token, league_id)
     my_team_counts = get_my_team_counts(token, league_id, my_manager_id)
-    blocked_teams, opponent_profiles = analyze_opponents(
-        token, league_id, ranking_res, my_manager_id)
+    today_str = datetime.now(timezone.utc).date().isoformat()
+    blocked_teams, opponent_profiles, opponent_squads = analyze_opponents(
+        token, league_id, ranking_res, my_manager_id,
+        history=history, today_str=today_str)
 
     my_squad_items = get_squad(token, league_id, my_manager_id) if my_manager_id else []
     my_gap_codes = missing_position_codes(count_by_pos(my_squad_items))
 
     feed_items = get_league_feed(token, league_id)
+    diagnose_feed_types(feed_items)
     transfers = parse_feed(feed_items)
     new_tx = merge_transfers_into_history(transfers, history)
     transfer_summary = summarize_transfers_from_history(history)
     total_tx = len(history.get("_transfers", {}))
     print(f"Transfers im Feed: {len(transfers)} ({new_tx} neu) | gespeichert gesamt: {total_tx}")
 
+    sales_summary = get_sales_summary(history)
     cash_debug_rows = build_opponent_cash_tracker(
         opponent_profiles,
         transfer_summary,
+        sales_summary=sales_summary,
     )
     print_cash_debug(cash_debug_rows)
     cash_by_name = {row["name"]: row for row in cash_debug_rows}
 
     win_probs = get_bundesliga_odds()
     fixture_cache, unmapped = {}, set()
-    today_str = datetime.now(timezone.utc).date().isoformat()
 
     evaluated = []
     for p in all_market:
@@ -1497,11 +1626,7 @@ def main():
     # damit neu auf dem Markt erscheinende Spieler sofort einen echten Trend
     # haben statt erst zwei Tage "kein Trendvergleich" zu zeigen.
     if CONFIG["CRAWL_BATCH_SIZE"] > 0:
-        opponent_squads = []
-        for uid, _name in extract_league_users(ranking_res):
-            if str(uid) != str(my_manager_id):
-                opponent_squads.append(get_squad(token, league_id, uid))
-                time.sleep(CONFIG["OPPONENT_FETCH_SLEEP"])
+        # Kader wiederverwenden, die analyze_opponents bereits geholt hat
         known_ids = collect_known_player_ids(
             all_market, opponent_squads + [my_squad_items], history)
         batch = pick_crawl_batch(known_ids, history,
