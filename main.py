@@ -455,8 +455,18 @@ def get_league_feed(token, league_id):
     return []
 
 def parse_feed(feed_items):
+    """
+    Liest Kaeufe UND Verkaeufe aus dem Feed.
+
+    Struktur aus Live-Daten verifiziert (Typ 15 deckt beides ab):
+      Kauf:    data.byr = Kaeufer,    data.pn = Spieler, data.trp = Preis
+      Verkauf: data.slr = Verkaeufer, data.pn = Spieler, data.trp = Preis
+    Ein Manager-zu-Manager-Transfer kann beide Felder tragen und wird dann
+    als Kauf UND Verkauf gezaehlt - genau richtig, denn beide Konten bewegen sich.
+    """
     transfers = []
-    name_keys = ["byr", "buyerName", "bn", "userName"]
+    buyer_keys = ["byr", "buyerName", "bn", "userName"]
+    seller_keys = ["slr", "sellerName", "sn"]
     player_keys = ["pn", "playerName", "pfn"]
     price_keys = ["trp", "price", "value", "mv"]
     for item in feed_items:
@@ -466,46 +476,47 @@ def parse_feed(feed_items):
         for nk in ["data", "d", "meta"]:
             if isinstance(item.get(nk), dict):
                 flat.update(item[nk])
-        buyer = next((flat[k].strip() for k in name_keys
+        buyer = next((flat[k].strip() for k in buyer_keys
                       if isinstance(flat.get(k), str) and flat[k].strip()), None)
+        seller = next((flat[k].strip() for k in seller_keys
+                       if isinstance(flat.get(k), str) and flat[k].strip()), None)
         player = next((flat[k].strip() for k in player_keys
                        if isinstance(flat.get(k), str) and flat[k].strip()), None)
         price = next((int(flat[k]) for k in price_keys
                       if isinstance(flat.get(k), (int, float)) and flat[k] > 0), None)
-        if buyer and player and price:
+        if not (player and price):
+            continue
+        base_id = str(item.get("i") or "")
+        if buyer:
             transfers.append({
-                # Feed-ID zum Deduplizieren - ohne sie koennte derselbe Transfer
-                # bei jedem Lauf erneut gezaehlt werden.
-                "id": str(item.get("i") or ""),
-                "buyer": buyer, "player": player, "price": price,
-                "date": item.get("dt"),
+                "id": f"{base_id}|buy" if base_id else "",
+                "kind": "buy", "manager": buyer,
+                "player": player, "price": price, "date": item.get("dt"),
+            })
+        if seller:
+            transfers.append({
+                "id": f"{base_id}|sell" if base_id else "",
+                "kind": "sell", "manager": seller,
+                "player": player, "price": price, "date": item.get("dt"),
             })
     return transfers
 
 
 def merge_transfers_into_history(transfers, history):
     """
-    Speichert Transfers dauerhaft in der History statt sie bei jedem Lauf
-    neu aus dem Feed zu zaehlen.
-
-    HINTERGRUND: Der Kickbase-Feed ist ein rollierendes Fenster - aeltere
-    Transfers verschwinden daraus. Wer nur den aktuellen Feed auswertet,
-    "vergisst" alte Kaeufe, wodurch die geschaetzte Cash-Untergrenze der
-    Gegner mit der Zeit faelschlich immer weiter steigt.
-
-    Deduplizierung ueber die Feed-ID. Transfers ohne ID bekommen einen
-    Ersatzschluessel aus Kaeufer+Spieler+Preis (gleicher Kauf zweimal am
-    selben Tag ist praktisch ausgeschlossen).
-    Rueckgabe: Anzahl NEU hinzugefuegter Transfers.
+    Speichert Transfers dauerhaft, dedupliziert ueber die Feed-ID.
+    Der Kickbase-Feed ist ein rollierendes Fenster - ohne Persistenz wuerden
+    aeltere Kaeufe/Verkaeufe "vergessen" und die Cash-Schaetzung driftet.
     """
     store = history.setdefault("_transfers", {})
     added = 0
     for t in transfers:
-        key = t.get("id") or f"{t['buyer']}|{t['player']}|{t['price']}"
+        key = t.get("id") or f"{t['kind']}|{t['manager']}|{t['player']}|{t['price']}"
         if key in store:
             continue
         store[key] = {
-            "buyer": t["buyer"], "player": t["player"],
+            "kind": t.get("kind", "buy"),
+            "manager": t["manager"], "player": t["player"],
             "price": t["price"], "date": t.get("date"),
         }
         added += 1
@@ -514,21 +525,65 @@ def merge_transfers_into_history(transfers, history):
 
 def summarize_transfers_from_history(history):
     """
-    Baut die Kaufuebersicht aus ALLEN jemals gesehenen Transfers,
-    nicht nur aus dem aktuellen Feed-Fenster.
+    Kaeufe je Manager aus ALLEN gespeicherten Transfers.
+    Rueckwaertskompatibel: alte Eintraege ohne "kind" gelten als Kauf und
+    nutzen noch den alten Schluessel "buyer".
     """
     summary = {}
     for entry in history.get("_transfers", {}).values():
-        buyer = entry.get("buyer")
-        price = entry.get("price")
-        if not buyer or not isinstance(price, (int, float)):
+        if entry.get("kind", "buy") != "buy":
             continue
-        e = summary.setdefault(buyer, {"count": 0, "total": 0, "players": []})
+        mgr = entry.get("manager") or entry.get("buyer")
+        price = entry.get("price")
+        if not mgr or not isinstance(price, (int, float)):
+            continue
+        e = summary.setdefault(mgr, {"count": 0, "total": 0, "players": []})
         e["count"] += 1
         e["total"] += int(price)
         if len(e["players"]) < 3 and entry.get("player"):
             e["players"].append(entry["player"])
     return summary
+
+
+def sales_from_feed_history(history):
+    """
+    Verkaufserloese je Manager aus den gespeicherten Feed-Transfers.
+    Das sind ECHTE Preise - im Gegensatz zur Kader-Differenz-Schaetzung.
+    """
+    summary = {}
+    for entry in history.get("_transfers", {}).values():
+        if entry.get("kind") != "sell":
+            continue
+        mgr = entry.get("manager")
+        price = entry.get("price")
+        if not mgr or not isinstance(price, (int, float)):
+            continue
+        e = summary.setdefault(mgr, {"count": 0, "total": 0, "players": []})
+        e["count"] += 1
+        e["total"] += int(price)
+        if len(e["players"]) < 3 and entry.get("player"):
+            e["players"].append(entry["player"])
+    return summary
+
+
+def combine_sales(feed_sales, squad_sales):
+    """
+    Fuehrt beide Verkaufsquellen zusammen.
+    Der Feed liefert echte Preise, ist aber ein rollierendes Fenster und kann
+    Verkaeufe verpasst haben, die vor dem ersten Lauf lagen. Die Kader-Differenz
+    faengt alles ab, schaetzt aber nur. Pro Manager wird der HOEHERE Wert
+    genommen - beide Quellen zaehlen dieselben Verkaeufe, addieren waere
+    doppelt gezaehlt.
+    """
+    combined = {}
+    for name in set(feed_sales) | set(squad_sales):
+        f = feed_sales.get(name, {"count": 0, "total": 0})
+        s = squad_sales.get(name, {"count": 0, "total": 0})
+        if f["total"] >= s["total"]:
+            combined[name] = {"count": f["count"], "total": f["total"], "source": "Feed"}
+        else:
+            combined[name] = {"count": s["count"], "total": s["total"], "source": "Kader"}
+    return combined
 
 
 def summarize_transfers(transfers):
@@ -1129,6 +1184,93 @@ def evaluate_prediction_hit(prediction_check):
     is_hit = same_direction and (1 - tol) <= ratio <= (1 + tol)
     return is_hit
 
+
+def record_prediction_results(evaluated, history, today_str):
+    """
+    Schreibt die Prognose-Ergebnisse dieses Laufs dauerhaft in die History.
+
+    Damit laesst sich ueber Tage hinweg beantworten, ob die Prognosen
+    ueberhaupt taugen - und wie stark sie systematisch daneben liegen.
+    Gespeichert wird pro Tag:
+      n              Anzahl geprüfter Prognosen
+      hits           davon im Toleranzbereich
+      direction_ok   Richtung stimmte (rauf/runter)
+      sum_pred       Summe der vorhergesagten Bewegungen
+      sum_act        Summe der tatsaechlichen Bewegungen
+    sum_act/sum_pred ist der KALIBRIERUNGSFAKTOR: liegt er bei 0,7, sagt die
+    Prognose systematisch 30% zu viel Anstieg voraus.
+    """
+    checks = [(p.get("prediction_check"), evaluate_prediction_hit(p.get("prediction_check")))
+              for p in evaluated if p.get("prediction_check")]
+    checks = [(c, h) for c, h in checks if c and h is not None]
+    if not checks:
+        return None
+
+    store = history.setdefault("_predictions", {})
+    day = {
+        "n": len(checks),
+        "hits": sum(1 for _, h in checks if h),
+        "direction_ok": sum(1 for c, _ in checks
+                            if (c["predicted_move"] > 0) == (c["actual_move"] > 0)),
+        "sum_pred": sum(c["predicted_move"] for c, _ in checks),
+        "sum_act": sum(c["actual_move"] for c, _ in checks),
+    }
+    store[today_str] = day
+    # Nur die letzten 30 Tage behalten
+    for old in sorted(store)[:-30]:
+        del store[old]
+    return day
+
+
+def prediction_accuracy_summary(history, days=7):
+    """
+    Fasst die gespeicherten Prognose-Ergebnisse der letzten N Tage zusammen.
+    Rueckgabe: None, wenn noch keine Daten vorliegen.
+    """
+    store = history.get("_predictions", {})
+    if not store:
+        return None
+    recent = [store[d] for d in sorted(store)[-days:]]
+    n = sum(x.get("n", 0) for x in recent)
+    if n == 0:
+        return None
+    hits = sum(x.get("hits", 0) for x in recent)
+    direction_ok = sum(x.get("direction_ok", 0) for x in recent)
+    sum_pred = sum(x.get("sum_pred", 0) for x in recent)
+    sum_act = sum(x.get("sum_act", 0) for x in recent)
+    calibration = (sum_act / sum_pred) if sum_pred else None
+    return {
+        "days": len(recent),
+        "n": n,
+        "hits": hits,
+        "hit_rate": hits / n,
+        "direction_rate": direction_ok / n,
+        "sum_pred": sum_pred,
+        "sum_act": sum_act,
+        "calibration": calibration,
+    }
+
+
+def format_accuracy_line(acc):
+    """Baut die Report-Zeile zur Prognose-Guete."""
+    if not acc:
+        return None
+    parts = [
+        f"🎯 <b>Prognose-Güte</b> (letzte {acc['days']} Tage, {acc['n']} Vorhersagen)",
+        f"   Richtung korrekt: {acc['direction_rate']*100:.0f}% · "
+        f"Treffer im Toleranzbereich: {acc['hit_rate']*100:.0f}%",
+    ]
+    cal = acc.get("calibration")
+    if cal is not None:
+        if cal < 0.8:
+            hinweis = f"Prognose zu optimistisch — reale Anstiege nur {cal*100:.0f}% der Vorhersage"
+        elif cal > 1.2:
+            hinweis = f"Prognose zu vorsichtig — reale Anstiege {cal*100:.0f}% der Vorhersage"
+        else:
+            hinweis = f"gut kalibriert ({cal*100:.0f}%)"
+        parts.append(f"   📐 {hinweis}")
+    return "\n".join(parts)
+
 STATUS_ICONS = {0: "🔵", 1: "🟢", 2: "🟡", 3: "🟠", 4: "🔴"}
 STATUS_LABELS = {0: "garantiert", 1: "sicher", 2: "Rotation", 3: "unwahrscheinlich", 4: "bank/keine Chance"}
 STATUS_FACTORS = {0: 1.15, 1: 1.10, 2: 1.00, 3: 0.90, 4: 0.75}
@@ -1287,7 +1429,7 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
 
 def build_report(evaluated, my_budget, days_left, opponent_profiles,
                  transfer_summary, lineups_ok=True, odds_ok=True,
-                 my_gap_codes=None, cash_by_name=None):
+                 my_gap_codes=None, cash_by_name=None, accuracy=None):
     lines = []
     lines.append(f"⚽ Kickbase Markt-Report — noch {days_left} Tage")
     if my_budget is not None:
@@ -1296,6 +1438,12 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
         lines.append("⚠️ Startelf-Daten nicht verfügbar.")
     if not odds_ok:
         lines.append("⚠️ Wettquoten nicht verfügbar (ODDS_API_KEY prüfen).")
+
+    # Kumulative Guete zuerst - eine einzelne Tagesquote schwankt stark,
+    # erst der Mehrtages-Schnitt sagt etwas ueber die Verlaesslichkeit aus.
+    acc_line = format_accuracy_line(accuracy)
+    if acc_line:
+        lines.append("\n" + acc_line)
 
     checks = [p["prediction_check"] for p in evaluated if p.get("prediction_check")]
     if checks:
@@ -1576,7 +1724,14 @@ def main():
     total_tx = len(history.get("_transfers", {}))
     print(f"Transfers im Feed: {len(transfers)} ({new_tx} neu) | gespeichert gesamt: {total_tx}")
 
-    sales_summary = get_sales_summary(history)
+    sales_feed = sales_from_feed_history(history)
+    sales_squad = get_sales_summary(history)
+    sales_summary = combine_sales(sales_feed, sales_squad)
+    if sales_summary:
+        feed_n = sum(1 for v in sales_summary.values() if v.get("source") == "Feed")
+        print(f"Verkäufe erfasst: {len(sales_summary)} Manager "
+              f"({feed_n}× aus Feed mit echten Preisen, Rest geschätzt)")
+
     cash_debug_rows = build_opponent_cash_tracker(
         opponent_profiles,
         transfer_summary,
@@ -1640,10 +1795,26 @@ def main():
         else:
             print(f"Crawler: alle {len(known_ids)} bekannten Spieler heute bereits erfasst.")
 
+    # Prognose-Ergebnisse dauerhaft festhalten und Mehrtages-Guete berechnen
+    heute = record_prediction_results(evaluated, history, today_str)
+    if heute:
+        print(f"Prognose heute geprüft: {heute['n']} Vorhersagen, "
+              f"{heute['hits']} Treffer, Richtung {heute['direction_ok']}x korrekt")
+    accuracy = prediction_accuracy_summary(history, days=7)
+    if accuracy:
+        cal = accuracy.get("calibration")
+        cal_txt = f", Kalibrierung {cal*100:.0f}%" if cal is not None else ""
+        print(f"Prognose-Güte (7 Tage): {accuracy['n']} Vorhersagen, "
+              f"Richtung {accuracy['direction_rate']*100:.0f}%, "
+              f"Treffer {accuracy['hit_rate']*100:.0f}%{cal_txt}")
+    else:
+        print("Prognose-Güte: noch keine ausgewerteten Vorhersagen (ab morgen verfügbar).")
+
     save_history(history, history_sha)
     report = build_report(evaluated, my_budget, days_left, opponent_profiles,
                           transfer_summary, lineups_ok=False, odds_ok=bool(win_probs),
-                          my_gap_codes=my_gap_codes, cash_by_name=cash_by_name)
+                          my_gap_codes=my_gap_codes, cash_by_name=cash_by_name,
+                          accuracy=accuracy)
     send_telegram(report)
     print("Pipeline-Durchlauf vollkommen erfolgreich beendet!")
 
