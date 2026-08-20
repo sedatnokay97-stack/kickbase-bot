@@ -56,7 +56,7 @@ CONFIG = {
     "DISCOVER_MV_ENDPOINT": False,
     # Einmalige Strukturanalyse des /performance-Endpunkts, um die echten
     # Feldnamen fuer Einsaetze und Saisonpunkte zu finden.
-    "DIAGNOSE_PERFORMANCE": True,
+    "DIAGNOSE_PERFORMANCE": False,
     # Sucht einmalig den Endpunkt fuer den historischen Marktwert-Verlauf
     # (die App zeigt bis zu 1 Jahr). Nach dem Fund abschaltbar.
 
@@ -377,6 +377,68 @@ def get_cached_mv_range(token, league_id, player_id, current_mv, history, today_
         return None, tief, hoch
     pos = max(0.0, min(1.0, (current_mv - tief) / (hoch - tief)))
     return pos, tief, hoch
+
+
+def fetch_season_stats(token, league_id, player_id, history=None, today_str=None):
+    """
+    Holt Einsaetze und Punkte der letzten abgeschlossenen Saison aus
+    /performance - dem einzigen Ort, wo diese Werte belastbar stehen.
+
+    Struktur (aus Live-Daten verifiziert):
+      {"it": [{"sid": "11", "ti": "2018/2019", "ph": [
+          {"day": 1, "p": 41, "mp": "90'", "ap": 57, "tp": 746}, ...]}]}
+      p  = Punkte an diesem Spieltag (fehlt, wenn nicht gespielt)
+      ap = Saison-Durchschnitt, tp = Saison-Gesamtpunkte
+
+    Einsaetze werden EXAKT gezaehlt (Eintraege mit "p"), nicht geschaetzt.
+    Die letzte Saison in der Liste ist die laufende und meist leer - genommen
+    wird die letzte mit tatsaechlichen Punkten.
+
+    Rueckgabe: {"appearances", "total_points", "avg_points", "season"} oder None
+    """
+    cache = history.setdefault("_seasonstats", {}) if history is not None else {}
+    pid = str(player_id)
+    zwischenspeicher = cache.get(pid)
+    if zwischenspeicher and zwischenspeicher.get("d") == today_str:
+        return zwischenspeicher.get("v")
+
+    try:
+        r = requests.get(
+            f"https://api.kickbase.com/v4/leagues/{league_id}/players/{player_id}/performance",
+            headers=_kb(token), timeout=CONFIG["REQUEST_TIMEOUT"])
+        if r.status_code != 200:
+            return None
+        saisons = r.json().get("it")
+        if not isinstance(saisons, list):
+            return None
+    except Exception:
+        return None
+
+    ergebnis = None
+    for saison in reversed(saisons):        # neueste zuerst
+        if not isinstance(saison, dict):
+            continue
+        spieltage = saison.get("ph")
+        if not isinstance(spieltage, list):
+            continue
+        punkte = [e.get("p") for e in spieltage
+                  if isinstance(e, dict) and isinstance(e.get("p"), (int, float))]
+        if not punkte:
+            continue                        # laufende Saison ohne Spiele
+        einsaetze = len(punkte)
+        gesamt = int(sum(punkte))
+        ergebnis = {
+            "appearances": einsaetze,
+            "total_points": gesamt,
+            "avg_points": round(gesamt / einsaetze, 1),
+            "season": saison.get("ti"),
+        }
+        break
+
+    if history is not None and today_str:
+        cache[pid] = {"d": today_str, "v": ergebnis}
+    time.sleep(0.15)
+    return ergebnis
 
 
 def diagnose_performance_endpoint(token, league_id, player_id, player_name="?"):
@@ -1795,7 +1857,8 @@ def teamwert_confidence(player_result):
 def evaluate_player(player, history, injured_list, headlines, days_left,
                     my_team_counts=None, blocked_teams=None, my_budget=None,
                     fixture_info=None, win_prob=None, today_str=None,
-                    detail=None, matchdays_played=None, mv_range=None):
+                    detail=None, matchdays_played=None, mv_range=None,
+                    season_stats=None):
     pid = player.get("id", player.get("i"))
     tid = player.get("tid")
     pos_code = None
@@ -1821,8 +1884,16 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     kb_daily_trend = stats["daily_trend_api"]
     mdsum = stats["mdsum"]
     avg_points = stats["avg_points"]
-    appearances = stats.get("appearances")
-    total_points_season = stats.get("total_points")
+    # Echte Saisondaten aus /performance haben Vorrang - dort sind die
+    # Einsaetze exakt gezaehlt statt aus unklaren Feldern geraten.
+    if season_stats:
+        appearances = season_stats.get("appearances")
+        total_points_season = season_stats.get("total_points")
+        if season_stats.get("avg_points"):
+            avg_points = season_stats["avg_points"]
+    else:
+        appearances = stats.get("appearances")
+        total_points_season = stats.get("total_points")
     # Wie belastbar ist der Oe-Wert? 100 Punkte aus 29 Spielen sind etwas
     # anderes als 100 aus 2 Spielen.
     apps_confidence = appearance_confidence(appearances)
@@ -1894,13 +1965,16 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     # Zusaetzlich nach Einsatzzahl der VORSAISON daempfen: Ein Oe-Wert aus
     # 2 Spielen ist kein verlaesslicher Massstab, einer aus 29 schon.
     # Wirkt nur, wenn die Feldzuordnung bestaetigt wurde (siehe unten).
-    if relative_value_score is not None and CONFIG.get("USE_APPEARANCE_WEIGHT"):
+    # Daempfung immer anwenden, wenn die Einsatzzahl aus /performance stammt -
+    # die ist gezaehlt, nicht geraten, und braucht keinen Bestaetigungsschalter.
+    if relative_value_score is not None and (season_stats or CONFIG.get("USE_APPEARANCE_WEIGHT")):
         relative_value_score *= apps_confidence
 
     result = {
         "id": pid, "name": name, "mv": mv, "proj_mv": proj_mv,
         "max_bid": max_bid, "exp_profit": raw_profit,
         "range_pos": range_pos, "range_lo": range_lo, "range_hi": range_hi,
+        "season_label": (season_stats or {}).get("season"),
         "appearances": appearances, "total_points_season": total_points_season,
         "apps_confidence": apps_confidence,
         "daily_trend": daily_trend, "kb_trend": kb_daily_trend,
@@ -2077,9 +2151,9 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                     # etwas anderes als 100 aus 2 Spielen.
                     # Nur anzeigen, wenn die Feldzuordnung gegengeprueft wurde -
                     # sonst stuende dort eine Zahl, die nichts bedeutet.
-                    if CONFIG.get("USE_APPEARANCE_WEIGHT") and p.get("appearances"):
+                    if p.get("appearances"):
                         n_app = p["appearances"]
-                        avg_str += f" ({n_app} Einsatz{'' if n_app == 1 else 'e'})"
+                        avg_str += f" aus {n_app} Einsatz{'' if n_app == 1 else 'ätzen'}"
                 rv = p.get("relative_value_score")
                 rv_str = f" · 💎 Wert +{rv:.2f}" if rv is not None and rv > 0 else ""
                 trend_str = f" · 📈 {fmt_profit(p['kb_trend'])} €/Tag" if p.get("kb_trend") is not None else ""
@@ -2284,32 +2358,9 @@ def main():
                 probe.get("id", probe.get("i")),
                 probe.get("n", "?"))
 
-    # --- Feldzuordnung fuer Einsatzzahlen gegenpruefen ---
-    # Die Felder "smdc"/"stud" sind Kandidaten aus einem einzelnen Rohdump.
-    # Bevor sie die Bewertung beeinflussen, wird an einer Stichprobe geprueft,
-    # ob total_points/appearances ungefaehr den bekannten Oe-Punkten entspricht.
-    apps_samples = []
-    for p in [x for x in all_market if is_free_market_player(x)][:6]:
-        pid_probe = p.get("id", p.get("i"))
-        market_ap = p.get("ap")
-        if not pid_probe or not isinstance(market_ap, (int, float)) or market_ap <= 0:
-            continue
-        d = get_player_detail(token, league_id, pid_probe)
-        s = extract_player_stats(d)
-        apps_samples.append((float(market_ap), s.get("total_points"), s.get("appearances")))
-        time.sleep(0.2)
-
-    confirmed, checked, hits = verify_appearance_mapping(apps_samples)
-    CONFIG["USE_APPEARANCE_WEIGHT"] = confirmed
-    if checked == 0:
-        print("Einsatz-Gewichtung: keine pruefbaren Daten -> inaktiv")
-    elif confirmed:
-        print(f"Einsatz-Gewichtung AKTIV: Feldzuordnung bestaetigt ({hits}/{checked} Stichproben stimmen)")
-    else:
-        print(f"Einsatz-Gewichtung inaktiv: Zuordnung unbestaetigt ({hits}/{checked} Stichproben stimmen)")
-        for ap, tp, apps in apps_samples[:3]:
-            calc = f"{tp/apps:.0f}" if (tp and apps) else "?"
-            print(f"   Probe: Oe={ap:.0f} | Gesamtpunkte={tp} | Einsaetze={apps} | berechnet={calc}")
+    # Die frueheren Rate-Kandidaten (smdc/stud) werden nicht mehr gebraucht:
+    # /performance liefert die Einsaetze exakt gezaehlt.
+    CONFIG["USE_APPEARANCE_WEIGHT"] = False
 
     fixture_cache, unmapped = {}, set()
 
@@ -2327,6 +2378,7 @@ def main():
 
         detail = None
         mv_range = None
+        season_stats = None
         if is_free_market_player(p):
             pid_str = p.get("id", p.get("i"))
             if pid_str:
@@ -2336,12 +2388,15 @@ def main():
                 mv_range = get_cached_mv_range(
                     token, league_id, pid_str,
                     int(p.get("mv", p.get("m", 0))), history, today_str)
+                season_stats = fetch_season_stats(
+                    token, league_id, pid_str, history, today_str)
             time.sleep(0.2)
 
         res = evaluate_player(p, history, injured, headlines, days_left,
                                my_team_counts, blocked_teams, my_budget,
                                fixture_info, win_prob, today_str, detail=detail,
-                               matchdays_played=matchdays_played, mv_range=mv_range)
+                               matchdays_played=matchdays_played, mv_range=mv_range,
+                               season_stats=season_stats)
         if not is_free_market_player(p):
             seller = get_seller_name(p) or "?"
             res["category"] = "market_offer"
