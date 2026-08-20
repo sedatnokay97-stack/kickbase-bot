@@ -2614,5 +2614,171 @@
       "hi": 17131462,
       "n": 37
     }
+  },
+  "_seasonstats": {
+    "2237": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 4,
+        "total_points": 530,
+        "avg_points": 132.5,
+        "season": "2023/2024"
+      }
+    },
+    "2279": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 30,
+        "total_points": 2245,
+        "avg_points": 74.8,
+        "season": "2025/2026"
+      }
+    },
+    "2373": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 25,
+        "total_points": 2629,
+        "avg_points": 105.2,
+        "season": "2025/2026"
+      }
+    },
+    "2383": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 28,
+        "total_points": 4142,
+        "avg_points": 147.9,
+        "season": "2025/2026"
+      }
+    },
+    "2646": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 14,
+        "total_points": 1065,
+        "avg_points": 76.1,
+        "season": "2025/2026"
+      }
+    },
+    "2725": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 15,
+        "total_points": 897,
+        "avg_points": 59.8,
+        "season": "2024/2025"
+      }
+    },
+    "3139": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 30,
+        "total_points": 3026,
+        "avg_points": 100.9,
+        "season": "2025/2026"
+      }
+    },
+    "4404": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 20,
+        "total_points": 1279,
+        "avg_points": 64.0,
+        "season": "2025/2026"
+      }
+    },
+    "6168": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 34,
+        "total_points": 2209,
+        "avg_points": 65.0,
+        "season": "2025/2026"
+      }
+    },
+    "6319": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 28,
+        "total_points": 1898,
+        "avg_points": 67.8,
+        "season": "2025/2026"
+      }
+    },
+    "6667": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 11,
+        "total_points": 815,
+        "avg_points": 74.1,
+        "season": "2025/2026"
+      }
+    },
+    "7469": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 11,
+        "total_points": 288,
+        "avg_points": 26.2,
+        "season": "2025/2026"
+      }
+    },
+    "7717": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 32,
+        "total_points": 1591,
+        "avg_points": 49.7,
+        "season": "2025/2026"
+      }
+    },
+    "7774": {
+      "d": "2026-08-20",
+      "v": null
+    },
+    "8364": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 18,
+        "total_points": 940,
+        "avg_points": 52.2,
+        "season": "2025/2026"
+      }
+    },
+    "9390": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 4,
+        "total_points": 64,
+        "avg_points": 16.0,
+        "season": "2025/2026"
+      }
+    },
+    "11162": {
+      "d": "2026-08-20",
+      "v": {
+        "appearances": 33,
+        "total_points": 2805,
+        "avg_points": 85.0,
+        "season": "2025/2026"
+      }
+    },
+    "12158": {
+      "d": "2026-08-20",
+      "v": null
+    },
+    "15262": {
+      "d": "2026-08-20",
+      "v": null
+    },
+    "15613": {
+      "d": "2026-08-20",
+      "v": null
+    },
+    "16378": {
+      "d": "2026-08-20",
+      "v": null
+    }
   }
 }
