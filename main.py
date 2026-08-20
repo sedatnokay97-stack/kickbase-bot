@@ -51,6 +51,12 @@ CONFIG = {
     # Wird zur Laufzeit automatisch auf True gesetzt, sobald die Feldzuordnung
     # fuer die Einsatzzahl gegengeprueft und bestaetigt ist.
     "USE_APPEARANCE_WEIGHT": False,
+    # Sucht einmalig den Endpunkt fuer den historischen Marktwert-Verlauf.
+    # Auf False setzen, sobald er gefunden und angebunden ist.
+    "DISCOVER_MV_ENDPOINT": True,
+    # Sucht einmalig den Endpunkt fuer den historischen Marktwert-Verlauf
+    # (die App zeigt bis zu 1 Jahr). Nach dem Fund abschaltbar.
+    "DISCOVER_MV_ENDPOINT": True,
     "PREDICTION_HIT_TOLERANCE": 0.5,
     "URGENCY_THRESHOLD_MINUTES": 180,
     "ODDS_SPORT": "soccer_germany_bundesliga",
@@ -265,6 +271,58 @@ def get_squad(token, league_id, manager_id):
         return resp.json().get("it", [])
     except Exception:
         return []
+
+def discover_marketvalue_endpoint(token, league_id, player_id):
+    """
+    Sucht den Endpunkt fuer den historischen Marktwert-Verlauf.
+
+    Die Kickbase-App zeigt bis zu 1 Jahr Verlauf (Ansicht "3M"/"1J"), im
+    Detail-Endpunkt steckt er aber nicht. Er muss also eine eigene Adresse
+    haben. Welche, ist nicht dokumentiert - deshalb werden hier Kandidaten
+    durchprobiert und das Ergebnis ins Log geschrieben.
+
+    Laeuft nur fuer EINEN Spieler, kostet also wenige Aufrufe. Sobald die
+    richtige Adresse bekannt ist, kann diese Suche entfallen.
+    """
+    kandidaten = [
+        f"leagues/{league_id}/players/{player_id}/marketvalue/365",
+        f"leagues/{league_id}/players/{player_id}/marketvalue",
+        f"leagues/{league_id}/players/{player_id}/marketValues",
+        f"players/{player_id}/marketvalue/365",
+        f"players/{player_id}/marketvalue",
+        f"players/{player_id}/marketValues",
+        f"competitions/1/players/{player_id}/marketvalue/365",
+    ]
+    print("🔍 Suche Endpunkt fuer Marktwert-Verlauf...")
+    for pfad in kandidaten:
+        try:
+            resp = requests.get(f"https://api.kickbase.com/v4/{pfad}",
+                                headers=_kb(token), timeout=CONFIG["REQUEST_TIMEOUT"])
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            # Liste mit Werten finden
+            liste = data if isinstance(data, list) else None
+            schluessel = None
+            if liste is None and isinstance(data, dict):
+                for k, v in data.items():
+                    if isinstance(v, list) and v:
+                        liste, schluessel = v, k
+                        break
+            if liste:
+                ort = f" (im Ordner '{schluessel}')" if schluessel else ""
+                print(f"✅ GEFUNDEN: /{pfad}{ort} — {len(liste)} Eintraege")
+                print(f"🔬 Erster Eintrag: {json.dumps(liste[0], ensure_ascii=False)[:200]}")
+                if len(liste) > 1:
+                    print(f"🔬 Letzter Eintrag: {json.dumps(liste[-1], ensure_ascii=False)[:200]}")
+                return pfad
+            print(f"   /{pfad}: HTTP 200, aber keine Liste gefunden")
+        except Exception:
+            pass
+        time.sleep(0.2)
+    print("❌ Kein Endpunkt fuer den Marktwert-Verlauf gefunden.")
+    return None
+
 
 def get_player_detail(token, league_id, player_id):
     for path in [
@@ -1476,6 +1534,60 @@ def get_status_code(player, detail_stats=None):
     return None
 
 
+def discover_marketvalue_endpoint(token, league_id, player_id, player_name="?"):
+    """
+    Sucht den Endpunkt fuer den historischen Marktwert-Verlauf.
+
+    Die App zeigt bis zu 1 Jahr Verlauf (3M/1J-Umschalter), der Detail-
+    Endpunkt liefert ihn aber NICHT mit. Der Bot sammelt die Historie deshalb
+    bisher selbst - mit 8-25 Messpunkten statt 365.
+
+    Diese Funktion probiert bekannte Pfadmuster durch und protokolliert, was
+    zurueckkommt. Sie veraendert nichts an der Bewertung; sie liefert nur die
+    Information, die noetig ist, um den Verlauf spaeter sauber anzubinden.
+    """
+    kandidaten = [
+        f"leagues/{league_id}/players/{player_id}/marketvalue/365",
+        f"leagues/{league_id}/players/{player_id}/marketvalue/92",
+        f"leagues/{league_id}/players/{player_id}/marketvalue",
+        f"leagues/{league_id}/players/{player_id}/marketValues",
+        f"leagues/{league_id}/players/{player_id}/mv",
+        f"leagues/{league_id}/players/{player_id}/stats",
+        f"leagues/{league_id}/players/{player_id}/performance",
+        f"players/{player_id}/marketvalue/365",
+        f"players/{player_id}/marketvalue",
+    ]
+    print(f"🔎 Suche Marktwert-Verlauf fuer '{player_name}' (ID {player_id}) ...")
+    gefunden = []
+    for pfad in kandidaten:
+        try:
+            r = requests.get(f"https://api.kickbase.com/v4/{pfad}",
+                             headers=_kb(token), timeout=CONFIG["REQUEST_TIMEOUT"])
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            # Wie viele Werte stecken drin? Groesste Liste im JSON suchen.
+            groesste, schluessel = 0, None
+            if isinstance(data, list):
+                groesste, schluessel = len(data), "(Wurzel)"
+            elif isinstance(data, dict):
+                for k, v in data.items():
+                    if isinstance(v, list) and len(v) > groesste:
+                        groesste, schluessel = len(v), k
+            print(f"   ✅ {pfad} -> HTTP 200, groesste Liste: '{schluessel}' mit {groesste} Eintraegen")
+            if groesste >= 20:
+                probe = (data[schluessel] if schluessel != "(Wurzel)" else data)[:2]
+                print(f"      Beispieleintraege: {json.dumps(probe, ensure_ascii=False)[:300]}")
+                gefunden.append((pfad, schluessel, groesste))
+        except Exception:
+            continue
+        time.sleep(0.2)
+
+    if not gefunden:
+        print("   ❌ Kein Endpunkt mit Verlaufsdaten gefunden - Bot sammelt weiter selbst.")
+    return gefunden
+
+
 def diagnose_status_values(players, limit=8):
     """
     Listet Name + Rohwert des Startelf-Status, damit sich die Zuordnung
@@ -1997,6 +2109,24 @@ def main():
 
     win_probs = get_bundesliga_odds()
     diagnose_status_values(all_market)
+
+    # Einmalige Suche nach dem Verlaufs-Endpunkt (nur ein Spieler, ~2 Sek.).
+    # Nach erfolgreicher Identifikation kann das abgeschaltet werden.
+    if CONFIG.get("DISCOVER_MV_ENDPOINT"):
+        probe = next((p for p in all_market if is_free_market_player(p)), None)
+        if probe:
+            discover_marketvalue_endpoint(
+                token, league_id,
+                probe.get("id", probe.get("i")),
+                probe.get("n", "?"))
+
+    # Einmalige Suche nach dem Verlaufs-Endpunkt. Nach dem Fund kann
+    # DISCOVER_MV_ENDPOINT auf False gesetzt werden.
+    if CONFIG.get("DISCOVER_MV_ENDPOINT"):
+        probe = next((p.get("id") or p.get("i") for p in all_market
+                      if is_free_market_player(p)), None)
+        if probe:
+            discover_marketvalue_endpoint(token, league_id, probe)
 
     # --- Feldzuordnung fuer Einsatzzahlen gegenpruefen ---
     # Die Felder "smdc"/"stud" sind Kandidaten aus einem einzelnen Rohdump.
