@@ -6,7 +6,7 @@ import time
 import base64
 import requests
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from bs4 import BeautifulSoup
 
 KB_EMAIL = os.environ.get("KB_EMAIL")
@@ -53,7 +53,7 @@ CONFIG = {
     "USE_APPEARANCE_WEIGHT": False,
     # Sucht einmalig den Endpunkt fuer den historischen Marktwert-Verlauf.
     # Auf False setzen, sobald er gefunden und angebunden ist.
-    "DISCOVER_MV_ENDPOINT": True,
+    "DISCOVER_MV_ENDPOINT": False,
     # Sucht einmalig den Endpunkt fuer den historischen Marktwert-Verlauf
     # (die App zeigt bis zu 1 Jahr). Nach dem Fund abschaltbar.
     "DISCOVER_MV_ENDPOINT": True,
@@ -271,6 +271,110 @@ def get_squad(token, league_id, manager_id):
         return resp.json().get("it", [])
     except Exception:
         return []
+
+MV_EPOCH = date(1970, 1, 1)
+
+def fetch_mv_history(token, league_id, player_id, days=365):
+    """
+    Holt den historischen Marktwert-Verlauf.
+
+    Endpunkt aus Live-Daten bestaetigt:
+      leagues/{liga}/players/{id}/marketvalue/365
+      -> {"it": [{"dt": 20320, "mv": 1191709.0}, ...]}
+    "dt" sind Tage seit dem 01.01.1970 (verifiziert: dt=20320 -> 2025-08-20,
+    die Liste endet tagesgenau gestern).
+
+    Rueckgabe: Liste von (datum, marktwert), aelteste zuerst. Leer bei Fehler.
+    """
+    try:
+        r = requests.get(
+            f"https://api.kickbase.com/v4/leagues/{league_id}/players/{player_id}/marketvalue/{days}",
+            headers=_kb(token), timeout=CONFIG["REQUEST_TIMEOUT"])
+        if r.status_code != 200:
+            return []
+        items = r.json().get("it")
+        if not isinstance(items, list):
+            return []
+    except Exception:
+        return []
+
+    reihe = []
+    for e in items:
+        if not isinstance(e, dict):
+            continue
+        dt, mv = e.get("dt"), e.get("mv")
+        if not isinstance(dt, (int, float)) or not isinstance(mv, (int, float)) or mv <= 0:
+            continue
+        reihe.append((MV_EPOCH + timedelta(days=int(dt)), int(mv)))
+    reihe.sort(key=lambda x: x[0])
+    return reihe
+
+
+def range_position(reihe, current_mv):
+    """
+    Wo liegt der aktuelle Marktwert innerhalb der historischen Spanne?
+      0.0 = am Tiefstwert, 1.0 = am Hoechstwert
+
+    Beantwortet die Frage, die der Tagestrend nicht beantwortet: "steigt" ist
+    etwas anderes als "steht schon nahe am Jahreshoch". Genau der Unterschied,
+    der bei einem teuren Spieler ueber Gewinn oder Verlust entscheidet.
+
+    Rueckgabe: (position, tief, hoch) oder (None, None, None)
+    """
+    if not reihe or len(reihe) < 30 or not current_mv:
+        return None, None, None
+    werte = [mv for _, mv in reihe]
+    tief, hoch = min(werte), max(werte)
+    if hoch <= tief:
+        return None, tief, hoch
+    pos = (current_mv - tief) / (hoch - tief)
+    return max(0.0, min(1.0, pos)), tief, hoch
+
+
+def range_position_factor(pos):
+    """
+    Uebersetzt die Lage in der Jahresspanne in einen Overpay-Faktor.
+
+    Bewusst nur EINE Regel, keine Feinabstufung: Wer nahe am Jahreshoch
+    kauft, hat wenig Luft nach oben und viel Fallhoehe.
+      > 0.75 -> 0.85 (teuer, Abschlag)
+      < 0.35 -> 1.10 (guenstig im historischen Vergleich)
+      sonst  -> 1.00
+    """
+    if pos is None:
+        return 1.0
+    if pos > 0.75:
+        return 0.85
+    if pos < 0.35:
+        return 1.10
+    return 1.0
+
+
+def get_cached_mv_range(token, league_id, player_id, current_mv, history, today_str):
+    """
+    Liefert (position, tief, hoch) und holt den Verlauf hoechstens einmal
+    pro Spieler und Tag - 365 Eintraege bei jedem Lauf neu zu ziehen waere
+    unnoetige Last, da sich der Verlauf nur einmal taeglich aendert.
+    """
+    cache = history.setdefault("_mvrange", {})
+    pid = str(player_id)
+    eintrag = cache.get(pid)
+    if eintrag and eintrag.get("d") == today_str:
+        tief, hoch = eintrag.get("lo"), eintrag.get("hi")
+    else:
+        reihe = fetch_mv_history(token, league_id, player_id)
+        if len(reihe) < 30:
+            return None, None, None
+        werte = [mv for _, mv in reihe]
+        tief, hoch = min(werte), max(werte)
+        cache[pid] = {"d": today_str, "lo": tief, "hi": hoch, "n": len(reihe)}
+        time.sleep(0.15)
+
+    if not tief or not hoch or hoch <= tief:
+        return None, tief, hoch
+    pos = max(0.0, min(1.0, (current_mv - tief) / (hoch - tief)))
+    return pos, tief, hoch
+
 
 def discover_marketvalue_endpoint(token, league_id, player_id):
     """
@@ -1656,7 +1760,7 @@ def teamwert_confidence(player_result):
 def evaluate_player(player, history, injured_list, headlines, days_left,
                     my_team_counts=None, blocked_teams=None, my_budget=None,
                     fixture_info=None, win_prob=None, today_str=None,
-                    detail=None, matchdays_played=None):
+                    detail=None, matchdays_played=None, mv_range=None):
     pid = player.get("id", player.get("i"))
     tid = player.get("tid")
     pos_code = None
@@ -1706,7 +1810,11 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
                    else CONFIG["MOMENTUM_BRAKE"] if momentum == "verlangsamt"
                    else 1.0)
     mf_lineup = lineup_factor_from_status(status_code)
-    overpay_factor = CONFIG["OVERPAY_BASE_FACTOR"] * mf * mf_momentum * mf_lineup
+    # Lage in der Jahresspanne: nahe am Hoch = wenig Luft nach oben.
+    range_pos, range_lo, range_hi = (mv_range or (None, None, None))
+    mf_range = range_position_factor(range_pos)
+    overpay_factor = (CONFIG["OVERPAY_BASE_FACTOR"]
+                      * mf * mf_momentum * mf_lineup * mf_range)
 
     proj_mv, max_bid, raw_profit = predict(mv, daily_trend, days_left, overpay_factor)
 
@@ -1757,6 +1865,7 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     result = {
         "id": pid, "name": name, "mv": mv, "proj_mv": proj_mv,
         "max_bid": max_bid, "exp_profit": raw_profit,
+        "range_pos": range_pos, "range_lo": range_lo, "range_hi": range_hi,
         "appearances": appearances, "total_points_season": total_points_season,
         "apps_confidence": apps_confidence,
         "daily_trend": daily_trend, "kb_trend": kb_daily_trend,
@@ -1866,6 +1975,18 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                 extras.append(f"{STATUS_ICONS[sc]} {STATUS_LABELS[sc]}")
             if p.get("kb_trend") is not None:
                 extras.append(f"📈 KB-Trend {fmt_profit(p['kb_trend'])} €/Tag")
+            # Lage in der Jahresspanne - beantwortet "teuer oder guenstig?",
+            # was der Tagestrend allein nicht sagt.
+            if p.get("range_pos") is not None:
+                pct = p["range_pos"] * 100
+                if pct > 75:
+                    marke = "⚠️ nahe Jahreshoch"
+                elif pct < 35:
+                    marke = "💎 günstig im Jahresvergleich"
+                else:
+                    marke = "Mittelfeld der Jahresspanne"
+                extras.append(
+                    f"📏 {pct:.0f}% ({fmt_money(p['range_lo'])}–{fmt_money(p['range_hi'])}) · {marke}")
             if p["fixture"]:
                 opps = ", ".join(p["fixture"]["opponents"])
                 extras.append(f"📅 {p['fixture']['label']} ({opps})")
@@ -2170,16 +2291,22 @@ def main():
         win_prob = win_probs.get(team_key) if team_key else None
 
         detail = None
+        mv_range = None
         if is_free_market_player(p):
             pid_str = p.get("id", p.get("i"))
             if pid_str:
                 detail = get_player_detail(token, league_id, pid_str)
+                # Jahresspanne nur fuer freie Spieler - nur die stehen im Report.
+                # Der Verlauf wird pro Spieler und Tag zwischengespeichert.
+                mv_range = get_cached_mv_range(
+                    token, league_id, pid_str,
+                    int(p.get("mv", p.get("m", 0))), history, today_str)
             time.sleep(0.2)
 
         res = evaluate_player(p, history, injured, headlines, days_left,
                                my_team_counts, blocked_teams, my_budget,
                                fixture_info, win_prob, today_str, detail=detail,
-                               matchdays_played=matchdays_played)
+                               matchdays_played=matchdays_played, mv_range=mv_range)
         if not is_free_market_player(p):
             seller = get_seller_name(p) or "?"
             res["category"] = "market_offer"
