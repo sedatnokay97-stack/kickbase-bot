@@ -291,7 +291,7 @@ def extract_player_stats(detail):
         daily_trend_api = int(v)
     status_code = None
     v = detail.get("prob")
-    if isinstance(v, int) and 0 <= v <= 4:
+    if isinstance(v, int) and 1 <= v <= 5:
         status_code = v
     mdsum = detail.get("mdsum")
     if not isinstance(mdsum, list):
@@ -1450,10 +1450,13 @@ def format_accuracy_line(acc):
 # ACHTUNG: Welche Zahl welcher Stufe entspricht, ist aus Rohdaten abgeleitet
 # und nicht dokumentiert. diagnose_status_values() gibt eine Stichprobe ins
 # Log, damit sich das gegen die App gegenpruefen laesst.
-STATUS_ICONS = {0: "🔵", 1: "🟢", 2: "🟠", 3: "🔴", 4: "⚫"}
-STATUS_LABELS = {0: "Sicher", 1: "Erwartet", 2: "Unsicher",
-                 3: "Unwahrscheinlich", 4: "Ausgeschlossen"}
-STATUS_FACTORS = {0: 1.15, 1: 1.10, 2: 1.00, 3: 0.90, 4: 0.70}
+# Kickbase zaehlt von 1 bis 5, nicht ab 0 - belegt durch die Rohwerte im Log
+# (Drewes=5, Stark=5, keine einzige 0 in der Stichprobe). Die alte 0-4-Annahme
+# hat alle Spieler mit Wert 5 als "Status unbekannt" verworfen.
+STATUS_ICONS = {1: "🔵", 2: "🟢", 3: "🟠", 4: "🔴", 5: "⚫"}
+STATUS_LABELS = {1: "Sicher", 2: "Erwartet", 3: "Unsicher",
+                 4: "Unwahrscheinlich", 5: "Ausgeschlossen"}
+STATUS_FACTORS = {1: 1.15, 2: 1.10, 3: 1.00, 4: 0.90, 5: 0.70}
 
 
 def get_status_code(player, detail_stats=None):
@@ -1468,7 +1471,7 @@ def get_status_code(player, detail_stats=None):
     if detail_stats and detail_stats.get("status_code") is not None:
         return detail_stats["status_code"]
     v = player.get("prob")
-    if isinstance(v, int) and 0 <= v <= 4:
+    if isinstance(v, int) and 1 <= v <= 5:
         return v
     return None
 
@@ -1526,7 +1529,8 @@ def is_teamwert_candidate(player_result):
     rv = player_result.get("relative_value_score")
     if rv is not None and rv > 0:
         return True
-    if avg_pts is None and sc is not None and sc <= 1:
+    # Skala 1-5: 1=Sicher, 2=Erwartet -> als gesetzt behandeln
+    if avg_pts is None and sc is not None and sc <= 2:
         return True
     return False
 
@@ -1617,7 +1621,9 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     elif my_budget is not None and max_bid > my_budget:
         category, reason = "blocked", f"Gebot {fmt_money(max_bid)} über Budget"
     elif raw_profit >= 1_500_000:
-        if status_code is not None and status_code >= 3:
+        # Skala 1-5: ab 4 (Unwahrscheinlich) bzw. 5 (Ausgeschlossen) kein
+        # Top-Kandidat mehr, egal wie gut der Marktwert-Trend aussieht.
+        if status_code is not None and status_code >= 4:
             category = "watch"
             reason = f"hoher Trend, aber {STATUS_LABELS.get(status_code, 'unsicherer Status')} — Einsatz fraglich"
         else:
