@@ -54,9 +54,12 @@ CONFIG = {
     # Sucht einmalig den Endpunkt fuer den historischen Marktwert-Verlauf.
     # Auf False setzen, sobald er gefunden und angebunden ist.
     "DISCOVER_MV_ENDPOINT": False,
+    # Einmalige Strukturanalyse des /performance-Endpunkts, um die echten
+    # Feldnamen fuer Einsaetze und Saisonpunkte zu finden.
+    "DIAGNOSE_PERFORMANCE": True,
     # Sucht einmalig den Endpunkt fuer den historischen Marktwert-Verlauf
     # (die App zeigt bis zu 1 Jahr). Nach dem Fund abschaltbar.
-    "DISCOVER_MV_ENDPOINT": True,
+
     "PREDICTION_HIT_TOLERANCE": 0.5,
     "URGENCY_THRESHOLD_MINUTES": 180,
     "ODDS_SPORT": "soccer_germany_bundesliga",
@@ -374,6 +377,38 @@ def get_cached_mv_range(token, league_id, player_id, current_mv, history, today_
         return None, tief, hoch
     pos = max(0.0, min(1.0, (current_mv - tief) / (hoch - tief)))
     return pos, tief, hoch
+
+
+def diagnose_performance_endpoint(token, league_id, player_id, player_name="?"):
+    """
+    Zeigt die Struktur des /performance-Endpunkts.
+
+    Hintergrund: Die Kandidaten "smdc"/"stud" aus dem Detail-Endpunkt sind
+    NICHT Einsaetze und Gesamtpunkte - die Gegenprobe ergab 355 statt 105.
+    Der /performance-Endpunkt lieferte in der Suche 8 Eintraege (vermutlich
+    Saisons) und ist damit der naechstliegende Ort fuer diese Werte.
+    """
+    try:
+        r = requests.get(
+            f"https://api.kickbase.com/v4/leagues/{league_id}/players/{player_id}/performance",
+            headers=_kb(token), timeout=CONFIG["REQUEST_TIMEOUT"])
+        if r.status_code != 200:
+            print(f"🔬 /performance: HTTP {r.status_code}")
+            return
+        data = r.json()
+    except Exception as e:
+        print(f"🔬 /performance nicht abrufbar: {e}")
+        return
+
+    print(f"🔬 /performance fuer '{player_name}' - Struktur:")
+    if isinstance(data, dict):
+        print(f"   Wurzel-Felder: {sorted(data.keys())}")
+    items = data.get("it") if isinstance(data, dict) else None
+    if isinstance(items, list) and items:
+        print(f"   'it' enthaelt {len(items)} Eintraege")
+        print(f"   Erster Eintrag:  {json.dumps(items[0], ensure_ascii=False)[:400]}")
+        if len(items) > 1:
+            print(f"   Letzter Eintrag: {json.dumps(items[-1], ensure_ascii=False)[:400]}")
 
 
 def discover_marketvalue_endpoint(token, league_id, player_id):
@@ -2233,6 +2268,14 @@ def main():
 
     # Einmalige Suche nach dem Verlaufs-Endpunkt (nur ein Spieler, ~2 Sek.).
     # Nach erfolgreicher Identifikation kann das abgeschaltet werden.
+    if CONFIG.get("DIAGNOSE_PERFORMANCE"):
+        probe = next((p for p in all_market if is_free_market_player(p)), None)
+        if probe:
+            diagnose_performance_endpoint(
+                token, league_id,
+                probe.get("id", probe.get("i")),
+                probe.get("n", "?"))
+
     if CONFIG.get("DISCOVER_MV_ENDPOINT"):
         probe = next((p for p in all_market if is_free_market_player(p)), None)
         if probe:
@@ -2240,14 +2283,6 @@ def main():
                 token, league_id,
                 probe.get("id", probe.get("i")),
                 probe.get("n", "?"))
-
-    # Einmalige Suche nach dem Verlaufs-Endpunkt. Nach dem Fund kann
-    # DISCOVER_MV_ENDPOINT auf False gesetzt werden.
-    if CONFIG.get("DISCOVER_MV_ENDPOINT"):
-        probe = next((p.get("id") or p.get("i") for p in all_market
-                      if is_free_market_player(p)), None)
-        if probe:
-            discover_marketvalue_endpoint(token, league_id, probe)
 
     # --- Feldzuordnung fuer Einsatzzahlen gegenpruefen ---
     # Die Felder "smdc"/"stud" sind Kandidaten aus einem einzelnen Rohdump.
