@@ -54,6 +54,12 @@ CONFIG = {
     # So viele Tage muss der Bot einen Spieler selbst beobachtet haben,
     # bevor er dessen Trend fuer eine Prognose nutzt.
     "MIN_OBSERVED_DAYS": 3,
+    # Unterhalb dieses Marktwerts gilt ein Spieler als "Aufsteiger vom Boden":
+    # dort beschleunigt der Anstieg, statt abzuflachen.
+    "LOW_MV_THRESHOLD": 1_500_000,
+    "LOW_MV_GROWTH": 1.15,      # taegliche Beschleunigung statt Daempfung
+    "LOW_MV_MAX_ACCEL": 3.0,    # hoechstens das 3-fache des Ausgangstrends
+    "MAX_TOTAL_GROWTH": 1.5,    # hoechstens +150% Gesamtanstieg in der Prognose
     # Wird zur Laufzeit automatisch auf True gesetzt, sobald die Feldzuordnung
     # fuer die Einsatzzahl gegengeprueft und bestaetigt ist.
     "USE_APPEARANCE_WEIGHT": False,
@@ -68,7 +74,11 @@ CONFIG = {
     "DISCOVER_MANAGER_TRANSFERS": False,
     # Sucht einen Endpunkt fuer den Kontostand der Mitspieler. Geprueft wird
     # gegen den eigenen, exakt bekannten Kontostand.
-    "DISCOVER_BUDGET": True,
+    # Suche abgeschlossen: Kickbase liefert den Kontostand der Mitspieler
+    # ueber keinen erreichbaren Endpunkt. Bleibt aus.
+    "DISCOVER_BUDGET": False,
+    # Anteil des Teamwerts, um den man ins Minus gehen darf (Kickbase-Regel).
+    "OVERDRAFT_PCT": 0.33,
     # Sucht einmalig den Endpunkt fuer den historischen Marktwert-Verlauf
     # (die App zeigt bis zu 1 Jahr). Nach dem Fund abschaltbar.
 
@@ -254,6 +264,79 @@ def get_ranking(token, league_id):
     except Exception as e:
         print(f"⚠️ Rangliste nicht ladbar: {e}")
         return {}
+
+# Felder, auf denen die Bewertung tatsaechlich beruht - mit Mindestquote.
+# Faellt eines davon aus, rechnet der Bot still mit Standardwerten weiter.
+# Genau das ist mehrfach passiert (prob lieferte "unbekannt", weil die Skala
+# 1-5 statt 0-4 geht). Ein Waechter auf FEHLENDE Felder trifft die reale
+# Ausfallart - anders als eine Meldung ueber neu hinzugekommene Felder.
+CRITICAL_FIELDS = {
+    "mv":   ("Marktwert",          0.90),
+    "prob": ("Startelf-Status",    0.50),
+    "pos":  ("Position",           0.80),
+    "tid":  ("Vereins-ID",         0.80),
+}
+
+def check_field_coverage(players):
+    """
+    Prueft, bei wie viel Prozent der Spieler die tragenden Felder vorhanden
+    sind. Rueckgabe: Liste von Warntexten (leer = alles in Ordnung).
+    """
+    if not players:
+        return []
+    warnungen = []
+    gesamt = len(players)
+    for feld, (bezeichnung, mindest) in CRITICAL_FIELDS.items():
+        vorhanden = sum(1 for p in players
+                        if isinstance(p, dict) and p.get(feld) not in (None, "", 0))
+        quote = vorhanden / gesamt
+        if quote < mindest:
+            warnungen.append(
+                f"{bezeichnung} nur bei {quote*100:.0f}% der Spieler "
+                f"(erwartet ≥{mindest*100:.0f}%) — Feld '{feld}' prüfen")
+    return warnungen
+
+
+def extract_team_values(ranking_res):
+    """
+    Liest den Teamwert je Manager aus der Rangliste.
+
+    Das Feld "tv" steht dort fuer jeden Teilnehmer bereit (verifiziert:
+    eigener Eintrag zeigte tv = 153.524.571). Kein Zusatzabruf noetig -
+    die Rangliste wird ohnehin bei jedem Lauf geholt.
+    """
+    werte = {}
+    if not isinstance(ranking_res, dict):
+        return werte
+    for value in ranking_res.values():
+        if not (isinstance(value, list) and value and isinstance(value[0], dict)):
+            continue
+        for item in value:
+            uid = item.get("mid") or item.get("id") or item.get("i")
+            tv = item.get("tv")
+            if uid and isinstance(tv, (int, float)) and tv > 0:
+                werte[str(uid)] = int(tv)
+        if werte:
+            break
+    return werte
+
+
+def effective_buying_power(budget, team_value):
+    """
+    Tatsaechliche Kaufkraft = Kontostand + erlaubter Ueberziehungsrahmen.
+
+    Kickbase erlaubt es, bis zu 33% des aktuellen Teamwerts ins Minus zu
+    gehen. Ohne diese Regel meldet der Bot bei negativem Kontostand alles
+    als "ueber Budget" - im letzten Report waren das 13 Spieler, obwohl
+    real noch 26 Mio Spielraum bestanden.
+    """
+    if budget is None:
+        return None, None
+    if not team_value:
+        return budget, None          # ohne Teamwert bleibt es beim Kontostand
+    rahmen = int(team_value * CONFIG["OVERDRAFT_PCT"])
+    return budget + rahmen, rahmen
+
 
 def extract_league_users(ranking_res):
     if not isinstance(ranking_res, dict):
@@ -623,58 +706,6 @@ def diagnose_performance_endpoint(token, league_id, player_id, player_name="?"):
         print(f"   Erster Eintrag:  {json.dumps(items[0], ensure_ascii=False)[:400]}")
         if len(items) > 1:
             print(f"   Letzter Eintrag: {json.dumps(items[-1], ensure_ascii=False)[:400]}")
-
-
-def discover_marketvalue_endpoint(token, league_id, player_id):
-    """
-    Sucht den Endpunkt fuer den historischen Marktwert-Verlauf.
-
-    Die Kickbase-App zeigt bis zu 1 Jahr Verlauf (Ansicht "3M"/"1J"), im
-    Detail-Endpunkt steckt er aber nicht. Er muss also eine eigene Adresse
-    haben. Welche, ist nicht dokumentiert - deshalb werden hier Kandidaten
-    durchprobiert und das Ergebnis ins Log geschrieben.
-
-    Laeuft nur fuer EINEN Spieler, kostet also wenige Aufrufe. Sobald die
-    richtige Adresse bekannt ist, kann diese Suche entfallen.
-    """
-    kandidaten = [
-        f"leagues/{league_id}/players/{player_id}/marketvalue/365",
-        f"leagues/{league_id}/players/{player_id}/marketvalue",
-        f"leagues/{league_id}/players/{player_id}/marketValues",
-        f"players/{player_id}/marketvalue/365",
-        f"players/{player_id}/marketvalue",
-        f"players/{player_id}/marketValues",
-        f"competitions/1/players/{player_id}/marketvalue/365",
-    ]
-    print("🔍 Suche Endpunkt fuer Marktwert-Verlauf...")
-    for pfad in kandidaten:
-        try:
-            resp = requests.get(f"https://api.kickbase.com/v4/{pfad}",
-                                headers=_kb(token), timeout=CONFIG["REQUEST_TIMEOUT"])
-            if resp.status_code != 200:
-                continue
-            data = resp.json()
-            # Liste mit Werten finden
-            liste = data if isinstance(data, list) else None
-            schluessel = None
-            if liste is None and isinstance(data, dict):
-                for k, v in data.items():
-                    if isinstance(v, list) and v:
-                        liste, schluessel = v, k
-                        break
-            if liste:
-                ort = f" (im Ordner '{schluessel}')" if schluessel else ""
-                print(f"✅ GEFUNDEN: /{pfad}{ort} — {len(liste)} Eintraege")
-                print(f"🔬 Erster Eintrag: {json.dumps(liste[0], ensure_ascii=False)[:200]}")
-                if len(liste) > 1:
-                    print(f"🔬 Letzter Eintrag: {json.dumps(liste[-1], ensure_ascii=False)[:200]}")
-                return pfad
-            print(f"   /{pfad}: HTTP 200, aber keine Liste gefunden")
-        except Exception:
-            pass
-        time.sleep(0.2)
-    print("❌ Kein Endpunkt fuer den Marktwert-Verlauf gefunden.")
-    return None
 
 
 def get_player_detail(token, league_id, player_id):
@@ -1771,12 +1802,40 @@ def compute_momentum(deltas):
     return "neutral"
 
 def predict(current_mv, daily_trend, days_left, overpay_factor):
+    """
+    Marktwert-Prognose.
+
+    Zwei Wachstumsmuster, weil Kickbase sich unterschiedlich verhaelt:
+
+    1) Etablierte Spieler: Anstiege flachen ab -> Daempfung 0,96.
+    2) Aufsteiger vom Boden (unter LOW_MV_THRESHOLD, typisch ab 500k):
+       Der Anstieg BESCHLEUNIGT sich, oft ueber Tage. Beobachtet bei Silas
+       (prognostiziert +14k, real +250k) und bei Bogdanov. Die uebliche
+       Daempfung rechnet hier genau falsch herum.
+
+    Die Beschleunigung wird bewusst gedeckelt: exponentielles Wachstum ohne
+    Grenze wuerde nach wenigen Tagen absurde Werte liefern.
+    """
     if daily_trend <= 0 or days_left <= 0:
         return current_mv, None, 0
-    damping, growth, cd = 0.96, 0.0, float(daily_trend)
+
+    aufsteiger = current_mv < CONFIG["LOW_MV_THRESHOLD"]
+    faktor = CONFIG["LOW_MV_GROWTH"] if aufsteiger else 0.96
+
+    growth, cd = 0.0, float(daily_trend)
     for _ in range(days_left):
         growth += cd
-        cd *= damping
+        cd *= faktor
+        if aufsteiger:
+            # Beschleunigung begrenzen - aber relativ zum AUSGANGSTREND,
+            # nicht zum Marktwert. Der 5%-Marktwert-Deckel ist fuer die
+            # Erkennung von Datenluecken gedacht; bei einem 600k-Spieler
+            # laege er bei 30k und wuerde einen realen Trend von 50k/Tag
+            # ausbremsen - also genau das Gegenteil bewirken.
+            cd = min(cd, daily_trend * CONFIG["LOW_MV_MAX_ACCEL"])
+
+    # Gesamtanstieg begrenzen - ein Spieler verdoppelt sich nicht in Tagen
+    growth = min(growth, current_mv * CONFIG["MAX_TOTAL_GROWTH"])
     proj_mv = int(current_mv + growth)
     max_bid = int(current_mv + growth * overpay_factor)
     return proj_mv, max_bid, int(growth)
@@ -2179,6 +2238,7 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
         "daily_trend": daily_trend, "kb_trend": kb_daily_trend,
         "momentum": momentum, "has_real": has_real,
         "is_injured": is_injured, "matched_news": matched_news,
+        "negative_news": negative,
         "violates": violates, "opp_blocked": opp_blocked, "budget_ok": budget_ok,
         "category": category, "reason": reason,
         "fixture": fixture_info, "win_prob": win_prob,
@@ -2195,19 +2255,44 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
 
 def build_report(evaluated, my_budget, days_left, opponent_profiles,
                  transfer_summary, lineups_ok=True, odds_ok=True,
-                 my_gap_codes=None, cash_by_name=None, accuracy=None):
+                 my_gap_codes=None, cash_by_name=None, accuracy=None,
+                 buying_power=None, overdraft=None, field_warnings=None):
     lines = []
     lines.append(f"⚽ Kickbase Markt-Report — noch {days_left} Tage")
     if my_budget is not None:
-        if my_budget < 0:
-            lines.append(f"🚨 <b>Budget im Minus: {fmt_money(my_budget)} €</b> — "
-                         f"erst verkaufen, dann kaufen")
+        if buying_power is not None and overdraft:
+            # Kickbase erlaubt 33% des Teamwerts als Ueberziehung. Ein
+            # negativer Kontostand bedeutet also NICHT, dass nichts mehr geht.
+            lines.append(
+                f"💳 Kaufkraft: <b>{fmt_money(buying_power)} €</b>"
+                f"  (Konto {fmt_money(my_budget)} + Rahmen {fmt_money(overdraft)})")
+            if buying_power < 1_000_000:
+                lines.append("🚨 <b>Rahmen fast ausgeschöpft</b> — verkaufen schafft Luft")
+        elif my_budget < 0:
+            lines.append(f"🚨 <b>Konto im Minus: {fmt_money(my_budget)} €</b>")
         else:
             lines.append(f"💳 Budget: {fmt_money(my_budget)} €")
     # Startelf-Warnung nur, wenn tatsaechlich kein einziger Spieler einen
     # Status hat. Frueher war das fest auf "nicht verfuegbar" gesetzt (Relikt
     # aus der Zeit, als LigaInsider die Quelle war) - inzwischen liefert
     # Kickbase den Status selbst ueber "prob".
+    for w in (field_warnings or []):
+        lines.append(f"🚨 <b>Datenausfall:</b> {esc(w)}")
+
+    # Negative Schlagzeilen GANZ NACH OBEN - unabhaengig davon, ob es
+    # gerade Kaufchancen gibt. Bisher erschienen sie nur im Detailblock von
+    # Top-Kandidaten; gab es keine, blieben 76 geladene Schlagzeilen komplett
+    # unsichtbar. Eine Verletzungsmeldung ist aber immer relevant.
+    alarm_news = []
+    for p in evaluated:
+        if p.get("category") == "market_offer":
+            continue
+        if p.get("negative_news") and p.get("matched_news"):
+            alarm_news.append((p["name"], p["matched_news"][0]))
+    if alarm_news:
+        lines.append("\n📰 <b>WICHTIGE MELDUNGEN</b>")
+        for name, schlagzeile in alarm_news[:5]:
+            lines.append(f"• <b>{esc(name)}</b>: {esc(schlagzeile[:110])}")
     if not any(p.get("status_code") is not None for p in evaluated):
         lines.append("⚠️ Startelf-Daten aktuell nicht verfügbar.")
     if not odds_ok:
@@ -2516,6 +2601,16 @@ def main():
     print(f"Spieltage absolviert: {matchdays_played} -> MAX_PER_TEAM = {CONFIG['MAX_PER_TEAM']}")
 
     ranking_res = get_ranking(token, league_id)
+    # Teamwerte aus der Rangliste (Feld "tv") - Grundlage fuer die
+    # 33%-Ueberziehungsregel.
+    team_values = extract_team_values(ranking_res)
+    my_team_value = team_values.get(str(my_manager_id))
+    buying_power, overdraft = effective_buying_power(my_budget, my_team_value)
+    if my_team_value:
+        print(f"💪 Teamwert {fmt_money(my_team_value)} -> Überziehungsrahmen "
+              f"{fmt_money(overdraft)} | Kaufkraft {fmt_money(buying_power)}")
+    else:
+        print("⚠️ Kein Teamwert in der Rangliste - rechne nur mit dem Kontostand.")
     my_team_counts = get_my_team_counts(token, league_id, my_manager_id)
     today_str = datetime.now(timezone.utc).date().isoformat()
     blocked_teams, opponent_profiles, opponent_squads = analyze_opponents(
@@ -2551,6 +2646,9 @@ def main():
 
     win_probs = get_bundesliga_odds()
     diagnose_status_values(all_market)
+    field_warnings = check_field_coverage(all_market)
+    for w in field_warnings:
+        print(f"🚨 FELD-AUSFALL: {w}")
 
     # Einmalige Suche nach dem Verlaufs-Endpunkt (nur ein Spieler, ~2 Sek.).
     # Nach erfolgreicher Identifikation kann das abgeschaltet werden.
@@ -2610,7 +2708,7 @@ def main():
             time.sleep(0.2)
 
         res = evaluate_player(p, history, injured, headlines, days_left,
-                               my_team_counts, blocked_teams, my_budget,
+                               my_team_counts, blocked_teams, buying_power,
                                fixture_info, win_prob, today_str, detail=detail,
                                matchdays_played=matchdays_played, mv_range=mv_range,
                                season_stats=season_stats)
@@ -2662,7 +2760,8 @@ def main():
     report = build_report(evaluated, my_budget, days_left, opponent_profiles,
                           transfer_summary, lineups_ok=False, odds_ok=bool(win_probs),
                           my_gap_codes=my_gap_codes, cash_by_name=cash_by_name,
-                          accuracy=accuracy)
+                          accuracy=accuracy, buying_power=buying_power,
+                          overdraft=overdraft, field_warnings=field_warnings)
     send_telegram(report)
     print("Pipeline-Durchlauf vollkommen erfolgreich beendet!")
 
