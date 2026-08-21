@@ -48,6 +48,12 @@ CONFIG = {
     "RV_CONFIDENCE_FULL_AT_MATCHDAY": 4,
     "RV_CONFIDENCE_BASE": 0.5,
     "AVG_POINTS_PLAUSIBILITY_MAX": 320,
+    # Hoechstens so viel Prozent des Marktwerts pro Tag - alles darueber ist
+    # eine Datenluecke, kein Trend.
+    "MAX_DAILY_TREND_PCT": 0.05,
+    # So viele Tage muss der Bot einen Spieler selbst beobachtet haben,
+    # bevor er dessen Trend fuer eine Prognose nutzt.
+    "MIN_OBSERVED_DAYS": 3,
     # Wird zur Laufzeit automatisch auf True gesetzt, sobald die Feldzuordnung
     # fuer die Einsatzzahl gegengeprueft und bestaetigt ist.
     "USE_APPEARANCE_WEIGHT": False,
@@ -57,6 +63,9 @@ CONFIG = {
     # Einmalige Strukturanalyse des /performance-Endpunkts, um die echten
     # Feldnamen fuer Einsaetze und Saisonpunkte zu finden.
     "DIAGNOSE_PERFORMANCE": False,
+    # Einmalige Suche nach der vollstaendigen Transfer-Historie pro Manager.
+    # Der Liga-Feed ist zu kurz - dadurch ist die Cash-Schaetzung unvollstaendig.
+    "DISCOVER_MANAGER_TRANSFERS": True,
     # Sucht einmalig den Endpunkt fuer den historischen Marktwert-Verlauf
     # (die App zeigt bis zu 1 Jahr). Nach dem Fund abschaltbar.
 
@@ -439,6 +448,54 @@ def fetch_season_stats(token, league_id, player_id, history=None, today_str=None
         cache[pid] = {"d": today_str, "v": ergebnis}
     time.sleep(0.15)
     return ergebnis
+
+
+def discover_manager_transfers(token, league_id, manager_id, manager_name="?"):
+    """
+    Sucht den Endpunkt fuer die vollstaendige Transfer-Historie eines Managers.
+
+    WARUM: Der Liga-Feed ist ein rollierendes Fenster (~13 Eintraege fuer die
+    ganze Liga). Bei schalkerboy77 zaehlte der Bot dadurch 4 von 12 Kaeufen
+    und 2 von 11 Verkaeufen - die Cash-Schaetzung lag 45,7 Mio daneben.
+    Die App zeigt die vollstaendige Liste, es muss also einen Endpunkt geben.
+    """
+    kandidaten = [
+        f"leagues/{league_id}/managers/{manager_id}/transfers",
+        f"leagues/{league_id}/managers/{manager_id}/transferhistory",
+        f"leagues/{league_id}/managers/{manager_id}/activities",
+        f"leagues/{league_id}/managers/{manager_id}/dashboard",
+        f"leagues/{league_id}/users/{manager_id}/transfers",
+        f"leagues/{league_id}/users/{manager_id}/activities",
+        f"leagues/{league_id}/managers/{manager_id}/performance",
+    ]
+    print(f"🔎 Suche Transfer-Historie fuer '{manager_name}' (ID {manager_id}) ...")
+    treffer = []
+    for pfad in kandidaten:
+        try:
+            r = requests.get(f"https://api.kickbase.com/v4/{pfad}",
+                             headers=_kb(token), timeout=CONFIG["REQUEST_TIMEOUT"])
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            groesste, schluessel = 0, None
+            if isinstance(data, list):
+                groesste, schluessel = len(data), "(Wurzel)"
+            elif isinstance(data, dict):
+                for k, v in data.items():
+                    if isinstance(v, list) and len(v) > groesste:
+                        groesste, schluessel = len(v), k
+            print(f"   ✅ {pfad} -> HTTP 200, Liste '{schluessel}' mit {groesste} Eintraegen")
+            if groesste >= 5:
+                liste = data[schluessel] if schluessel != "(Wurzel)" else data
+                print(f"      Beispiel: {json.dumps(liste[0], ensure_ascii=False)[:350]}")
+                treffer.append((pfad, schluessel, groesste))
+        except Exception:
+            continue
+        time.sleep(0.2)
+
+    if not treffer:
+        print("   ❌ Kein Endpunkt gefunden - Cash-Schaetzung bleibt unvollstaendig.")
+    return treffer
 
 
 def diagnose_performance_endpoint(token, league_id, player_id, player_name="?"):
@@ -1554,11 +1611,36 @@ def update_history(player_id, current_mv, history, today_str):
         days.append(new_entry)
     days = days[-CONFIG["MV_HISTORY_DAYS"]:]
     history[pid] = {"days": days}
-    mvs = [d["mv"] for d in days]
-    if len(mvs) >= 2:
-        deltas = [mvs[i] - mvs[i-1] for i in range(1, len(mvs))]
-        return deltas, True, prediction_check
-    return [], False, prediction_check
+    # Deltas PRO TAG normieren, nicht pro Eintrag.
+    #
+    # Grund: Spieler verschwinden zeitweise vom Markt und werden dann tagelang
+    # nicht erfasst. Die Differenz zwischen zwei Eintraegen deckt dann mehrere
+    # Tage ab. Wer sie ungeteilt als "Tagestrend" nimmt, ueberschaetzt massiv -
+    # bei Bornauw wurden aus +9,3 Mio ueber 8 Tage ein prognostizierter
+    # Tagesanstieg von +9,3 Mio (real: -400k).
+    deltas = []
+    for i in range(1, len(days)):
+        vorher, jetzt = days[i-1], days[i]
+        wert_delta = jetzt["mv"] - vorher["mv"]
+        try:
+            t = (date.fromisoformat(jetzt["d"]) - date.fromisoformat(vorher["d"])).days
+        except (ValueError, TypeError, KeyError):
+            t = 1                      # "legacy"-Eintraege ohne echtes Datum
+        if t < 1:
+            t = 1
+        if t > 14:
+            continue                   # zu grosse Luecke -> nicht aussagekraeftig
+        deltas.append(int(round(wert_delta / t)))
+
+    # Anzahl echter Beobachtungstage mitgeben: Bei neu in die Liga
+    # gekommenen Spielern meldet Kickbase am ersten Tag einen absurden
+    # tfhmvt-Wert (z.B. +9,3 Mio), weil gegen einen nicht existierenden
+    # Vorwert gerechnet wird. Solche Spieler brauchen erst ein paar Tage
+    # eigener Beobachtung, bevor eine Prognose sinnvoll ist.
+    echte_tage = len([d for d in days if d.get("d") != "legacy"])
+    if deltas:
+        return deltas, True, prediction_check, echte_tage
+    return [], False, prediction_check, echte_tage
 
 def store_prediction(pid, history, predicted_next_mv):
     """
@@ -1898,12 +1980,29 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     # anderes als 100 aus 2 Spielen.
     apps_confidence = appearance_confidence(appearances)
 
-    deltas, has_real, prediction_check = update_history(pid, mv, history, today_str)
+    deltas, has_real, prediction_check, beobachtungstage = update_history(
+        pid, mv, history, today_str)
     calculated_trend, _ = compute_trend(deltas)
     daily_trend = kb_daily_trend if kb_daily_trend is not None else calculated_trend
     if kb_daily_trend is not None:
         has_real = True
     momentum = compute_momentum(deltas) if len(deltas) >= 3 else "neutral"
+
+    # Neuzugaenge: Kickbase meldet am ersten Tag in der App einen
+    # unbrauchbaren Tagestrend (z.B. +9,3 Mio bei Bornauw), weil gegen einen
+    # nicht existierenden Vorwert gerechnet wird. Solange wir den Spieler
+    # nicht selbst ein paar Tage beobachtet haben, gibt es keine Prognose -
+    # ein ehrliches "noch unbekannt" ist besser als eine Fantasiezahl.
+    ist_neuzugang = beobachtungstage < CONFIG["MIN_OBSERVED_DAYS"]
+    if ist_neuzugang:
+        daily_trend = 0
+        has_real = False
+    else:
+        # Plausibilitaetsgrenze fuer alle uebrigen: Kickbase bewegt
+        # Marktwerte um wenige Prozent pro Tag.
+        grenze = int(mv * CONFIG["MAX_DAILY_TREND_PCT"]) if mv else 0
+        if grenze and abs(daily_trend) > grenze:
+            daily_trend = grenze if daily_trend > 0 else -grenze
 
     if daily_trend and daily_trend > 0:
         store_prediction(pid, history, mv + daily_trend)
@@ -1942,6 +2041,10 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
         category, reason = "blocked", "verletzt / gesperrt (LigaInsider)"
     elif negative:
         category, reason = "blocked", "negative Schlagzeile — erst prüfen"
+    elif ist_neuzugang:
+        category = "pending"
+        reason = (f"neu in der Liga — Kickbase-Trend am Anfang unbrauchbar, "
+                  f"erst {beobachtungstage} Tag(e) beobachtet")
     elif not has_real or max_bid is None:
         category, reason = "pending", "noch kein Tagesvergleich — morgen entscheiden"
     elif my_budget is not None and max_bid > my_budget:
@@ -1975,6 +2078,7 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
         "max_bid": max_bid, "exp_profit": raw_profit,
         "range_pos": range_pos, "range_lo": range_lo, "range_hi": range_hi,
         "season_label": (season_stats or {}).get("season"),
+        "is_newcomer": ist_neuzugang, "observed_days": beobachtungstage,
         "appearances": appearances, "total_points_season": total_points_season,
         "apps_confidence": apps_confidence,
         "daily_trend": daily_trend, "kb_trend": kb_daily_trend,
@@ -2000,7 +2104,11 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
     lines = []
     lines.append(f"⚽ Kickbase Markt-Report — noch {days_left} Tage")
     if my_budget is not None:
-        lines.append(f"💳 Budget: {fmt_money(my_budget)} €")
+        if my_budget < 0:
+            lines.append(f"🚨 <b>Budget im Minus: {fmt_money(my_budget)} €</b> — "
+                         f"erst verkaufen, dann kaufen")
+        else:
+            lines.append(f"💳 Budget: {fmt_money(my_budget)} €")
     # Startelf-Warnung nur, wenn tatsaechlich kein einziger Spieler einen
     # Status hat. Frueher war das fest auf "nicht verfuegbar" gesetzt (Relikt
     # aus der Zeit, als LigaInsider die Quelle war) - inzwischen liefert
@@ -2180,7 +2288,16 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
             lines.append(f"• {esc(p['name'])} — {p['reason']}")
 
     if pending:
-        lines.append(f"\n⏳ Noch beobachten ({len(pending)} Spieler ohne Trendvergleich)")
+        neulinge = [p for p in pending if p.get("is_newcomer")]
+        rest = len(pending) - len(neulinge)
+        teile = []
+        if rest:
+            teile.append(f"{rest} ohne Trendvergleich")
+        if neulinge:
+            namen = ", ".join(esc(p["name"]) for p in neulinge[:4])
+            weitere = f" +{len(neulinge)-4}" if len(neulinge) > 4 else ""
+            teile.append(f"{len(neulinge)} neu in der Liga ({namen}{weitere})")
+        lines.append("\n⏳ Noch beobachten: " + " · ".join(teile))
 
     footer_parts = []
     if skipped:
@@ -2342,6 +2459,10 @@ def main():
 
     # Einmalige Suche nach dem Verlaufs-Endpunkt (nur ein Spieler, ~2 Sek.).
     # Nach erfolgreicher Identifikation kann das abgeschaltet werden.
+    if CONFIG.get("DISCOVER_MANAGER_TRANSFERS"):
+        for uid, name in extract_league_users(ranking_res)[:1]:
+            discover_manager_transfers(token, league_id, uid, name)
+
     if CONFIG.get("DIAGNOSE_PERFORMANCE"):
         probe = next((p for p in all_market if is_free_market_player(p)), None)
         if probe:
