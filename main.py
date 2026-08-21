@@ -65,7 +65,10 @@ CONFIG = {
     "DIAGNOSE_PERFORMANCE": False,
     # Einmalige Suche nach der vollstaendigen Transfer-Historie pro Manager.
     # Der Liga-Feed ist zu kurz - dadurch ist die Cash-Schaetzung unvollstaendig.
-    "DISCOVER_MANAGER_TRANSFERS": True,
+    "DISCOVER_MANAGER_TRANSFERS": False,
+    # Sucht einen Endpunkt fuer den Kontostand der Mitspieler. Geprueft wird
+    # gegen den eigenen, exakt bekannten Kontostand.
+    "DISCOVER_BUDGET": True,
     # Sucht einmalig den Endpunkt fuer den historischen Marktwert-Verlauf
     # (die App zeigt bis zu 1 Jahr). Nach dem Fund abschaltbar.
 
@@ -448,6 +451,98 @@ def fetch_season_stats(token, league_id, player_id, history=None, today_str=None
         cache[pid] = {"d": today_str, "v": ergebnis}
     time.sleep(0.15)
     return ergebnis
+
+
+def discover_manager_budget(token, league_id, my_manager_id, my_budget, users):
+    """
+    Sucht einen Endpunkt, der den Kontostand ANDERER Manager direkt liefert.
+
+    WARUM: Die Cash-Formel (Startgeld + Boni - Kaeufe + Verkaeufe) ist
+    richtig, aber der Liga-Feed zeigt nur die letzten ~13 Transfers der
+    ganzen Liga. Bei schalkerboy77 fehlten dadurch 8 von 12 Kaeufen.
+    Ablesen waere besser als rechnen.
+
+    PRUEFSTEIN: Der eigene Kontostand ist ueber /me/budget exakt bekannt.
+    Liefert ein Kandidat fuer die eigene ID genau diesen Wert, ist er
+    bestaetigt - und wir koennen ihm auch fuer die Gegner trauen.
+    """
+    if my_budget is None:
+        print("🔎 Budget-Suche uebersprungen: eigener Kontostand unbekannt")
+        return None
+
+    print(f"🔎 Suche Kontostand-Endpunkt (Pruefwert: eigener Stand = {fmt_money(my_budget)})")
+
+    # 1) Steht der Wert vielleicht schon in der Rangliste?
+    for uid, name in users:
+        if str(uid) == str(my_manager_id):
+            print(f"   Eigener Eintrag in der Rangliste ist '{name}' (ID {uid})")
+            break
+
+    # 2) Kandidaten-Adressen durchprobieren, geprueft gegen den eigenen Stand
+    geld_keys = ["budget", "b", "amount", "cash", "bgt", "money"]
+    kandidaten = [
+        f"leagues/{league_id}/managers/{my_manager_id}/budget",
+        f"leagues/{league_id}/managers/{my_manager_id}",
+        f"leagues/{league_id}/users/{my_manager_id}/budget",
+        f"leagues/{league_id}/managers/{my_manager_id}/dashboard",
+        f"leagues/{league_id}/managers/{my_manager_id}/profile",
+        f"leagues/{league_id}/managers/{my_manager_id}/stats",
+    ]
+    treffer = []
+    for pfad in kandidaten:
+        try:
+            r = requests.get(f"https://api.kickbase.com/v4/{pfad}",
+                             headers=_kb(token), timeout=CONFIG["REQUEST_TIMEOUT"])
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            if not isinstance(data, dict):
+                continue
+            # Flach und eine Ebene tief nach Geldwerten suchen
+            flach = dict(data)
+            for k, v in list(data.items()):
+                if isinstance(v, dict):
+                    flach.update({f"{k}.{k2}": v2 for k2, v2 in v.items()})
+            funde = {k: v for k, v in flach.items()
+                     if any(g == k.split(".")[-1] for g in geld_keys)
+                     and isinstance(v, (int, float))}
+            if funde:
+                passend = [k for k, v in funde.items() if abs(int(v) - my_budget) < 1000]
+                status = "✅ STIMMT" if passend else "⚠️ Werte weichen ab"
+                print(f"   {status} {pfad}: {funde}")
+                if passend:
+                    treffer.append((pfad, passend[0]))
+            else:
+                print(f"   ℹ️ {pfad}: HTTP 200, aber kein Geldfeld "
+                      f"(Felder: {sorted(flach.keys())[:12]})")
+        except Exception:
+            continue
+        time.sleep(0.2)
+
+    if not treffer:
+        print("   ❌ Kein Endpunkt liefert den bekannten Kontostand - "
+              "Cash bleibt eine Schaetzung.")
+    return treffer
+
+
+def dump_ranking_structure(ranking_res, my_manager_id, my_budget):
+    """
+    Zeigt einen vollstaendigen Ranglisten-Eintrag. Falls Kickbase den
+    Kontostand dort schon mitliefert, ersparen wir uns jeden Zusatzabruf.
+    Der eigene Eintrag wird bevorzugt gezeigt, weil sein Kontostand bekannt
+    ist und sich direkt vergleichen laesst.
+    """
+    if not isinstance(ranking_res, dict):
+        return
+    for key, value in ranking_res.items():
+        if not (isinstance(value, list) and value and isinstance(value[0], dict)):
+            continue
+        eigener = next((x for x in value
+                        if str(x.get("mid") or x.get("id") or x.get("i")) == str(my_manager_id)),
+                       value[0])
+        print(f"🔬 Ranglisten-Eintrag (Ordner '{key}', eigener Stand = {fmt_money(my_budget)}):")
+        print(f"   {json.dumps(eigener, ensure_ascii=False)[:600]}")
+        break
 
 
 def discover_manager_transfers(token, league_id, manager_id, manager_name="?"):
@@ -2459,9 +2554,10 @@ def main():
 
     # Einmalige Suche nach dem Verlaufs-Endpunkt (nur ein Spieler, ~2 Sek.).
     # Nach erfolgreicher Identifikation kann das abgeschaltet werden.
-    if CONFIG.get("DISCOVER_MANAGER_TRANSFERS"):
-        for uid, name in extract_league_users(ranking_res)[:1]:
-            discover_manager_transfers(token, league_id, uid, name)
+    if CONFIG.get("DISCOVER_BUDGET"):
+        dump_ranking_structure(ranking_res, my_manager_id, my_budget)
+        discover_manager_budget(token, league_id, my_manager_id, my_budget,
+                                extract_league_users(ranking_res))
 
     if CONFIG.get("DIAGNOSE_PERFORMANCE"):
         probe = next((p for p in all_market if is_free_market_player(p)), None)
