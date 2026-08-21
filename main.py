@@ -2370,7 +2370,9 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
             sc = p.get("status_code")
             if sc is not None and sc in STATUS_ICONS:
                 extras.append(f"{STATUS_ICONS[sc]} {STATUS_LABELS[sc]}")
-            if p.get("kb_trend") is not None:
+            if p.get("is_newcomer"):
+                extras.append("🆕 neu in der Liga — Trend noch unbrauchbar")
+            elif p.get("kb_trend") is not None:
                 extras.append(f"📈 KB-Trend {fmt_profit(p['kb_trend'])} €/Tag")
             # Lage in der Jahresspanne - beantwortet "teuer oder guenstig?",
             # was der Tagestrend allein nicht sagt.
@@ -2441,10 +2443,19 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                     # sonst stuende dort eine Zahl, die nichts bedeutet.
                     if p.get("appearances"):
                         n_app = p["appearances"]
-                        avg_str += f" aus {n_app} Einsatz{'' if n_app == 1 else 'ätzen'}"
+                        avg_str += f" aus {n_app} {'Einsatz' if n_app == 1 else 'Einsätzen'}"
                 rv = p.get("relative_value_score")
                 rv_str = f" · 💎 Wert +{rv:.2f}" if rv is not None and rv > 0 else ""
-                trend_str = f" · 📈 {fmt_profit(p['kb_trend'])} €/Tag" if p.get("kb_trend") is not None else ""
+                # Bei Neuzugaengen keinen Kickbase-Trend zeigen: er wird gegen
+                # einen nicht existierenden Vorwert gerechnet (Bornauw: +8,9
+                # Mio/Tag). Die Prognose ignoriert ihn schon - der Report darf
+                # ihn dann nicht doch als Tatsache ausgeben.
+                if p.get("is_newcomer"):
+                    trend_str = " · 🆕 neu in der Liga, Trend noch unbrauchbar"
+                elif p.get("kb_trend") is not None:
+                    trend_str = f" · 📈 {fmt_profit(p['kb_trend'])} €/Tag"
+                else:
+                    trend_str = ""
                 bid_str = f"\n   👉 Max. Gebot: {fmt_money(p['max_bid'])} €" if p.get("max_bid") else ""
                 lines.append(
                     f"\n• {esc(p['name'])} — {fmt_money(p['mv'])} €\n"
@@ -2459,7 +2470,16 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
             for p in unverified[:5]:
                 sc = p.get("status_code")
                 status_str = f"{STATUS_ICONS.get(sc, '')} {STATUS_LABELS.get(sc, '?')}" if sc is not None else "?"
-                trend_str = f" · 📈 {fmt_profit(p['kb_trend'])} €/Tag" if p.get("kb_trend") is not None else ""
+                # Bei Neuzugaengen keinen Kickbase-Trend zeigen: er wird gegen
+                # einen nicht existierenden Vorwert gerechnet (Bornauw: +8,9
+                # Mio/Tag). Die Prognose ignoriert ihn schon - der Report darf
+                # ihn dann nicht doch als Tatsache ausgeben.
+                if p.get("is_newcomer"):
+                    trend_str = " · 🆕 neu in der Liga, Trend noch unbrauchbar"
+                elif p.get("kb_trend") is not None:
+                    trend_str = f" · 📈 {fmt_profit(p['kb_trend'])} €/Tag"
+                else:
+                    trend_str = ""
                 lines.append(f"• {esc(p['name'])} — {fmt_money(p['mv'])} € · {status_str}{trend_str}")
 
     if blocked:
