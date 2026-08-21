@@ -3,8 +3,21 @@ name: Kickbase Bot Execution
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 10 * * *'
-    - cron: '30 20 * * *'
+    # GitHub-Cron laeuft immer in UTC.
+    # Deutschland: Sommerzeit = UTC+2, Winterzeit = UTC+1.
+    # Kickbase-Marktwert-Update: ca. 22:00 deutscher Zeit.
+    #
+    # Krumme Minuten, weil GitHub geplante Laeufe zu vollen und halben
+    # Stunden stark verzoegert oder bei Last komplett verwirft.
+    # Die Zeiten liegen sommers wie winters auf der richtigen Seite des
+    # Updates - sonst kippt die Logik bei der Zeitumstellung Ende Oktober.
+    #
+    # UTC 10:07  ->  12:07 Sommer / 11:07 Winter  (Tagwert)
+    # UTC 19:20  ->  21:20 Sommer / 20:20 Winter  (VOR dem Update)
+    # UTC 21:20  ->  23:20 Sommer / 22:20 Winter  (NACH dem Update)
+    - cron: '7 10 * * *'
+    - cron: '20 19 * * *'
+    - cron: '20 21 * * *'
 
 permissions:
   contents: write
