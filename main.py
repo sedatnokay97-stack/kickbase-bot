@@ -54,6 +54,9 @@ CONFIG = {
     # So viele Tage muss der Bot einen Spieler selbst beobachtet haben,
     # bevor er dessen Trend fuer eine Prognose nutzt.
     "MIN_OBSERVED_DAYS": 3,
+    # So viele Tage muss Kickbase selbst einen Spieler kennen, damit sein
+    # Trend als belastbar gilt. Darunter: echter Neuzugang.
+    "MIN_KB_HISTORY_DAYS": 30,
     # Unterhalb dieses Marktwerts gilt ein Spieler als "Aufsteiger vom Boden":
     # dort beschleunigt der Anstieg, statt abzuflachen.
     "LOW_MV_THRESHOLD": 1_500_000,
@@ -462,16 +465,22 @@ def get_cached_mv_range(token, league_id, player_id, current_mv, history, today_
     else:
         reihe = fetch_mv_history(token, league_id, player_id)
         if len(reihe) < 30:
-            return None, None, None
+            # Sehr kurze Historie = echter Neuzugang. Laenge trotzdem melden.
+            return None, None, None, len(reihe)
         werte = [mv for _, mv in reihe]
         tief, hoch = min(werte), max(werte)
         cache[pid] = {"d": today_str, "lo": tief, "hi": hoch, "n": len(reihe)}
         time.sleep(0.15)
 
+    # Laenge der Kickbase-Historie mitgeben: Sie sagt, wie lange KICKBASE den
+    # Spieler kennt - im Gegensatz zu unserer eigenen Historie, die nur zeigt,
+    # wie lange WIR ihn beobachten. Ein HSV-Torwart mit 33 Einsaetzen hat
+    # 365 Eintraege, ein echter Neuzugang deutlich weniger.
+    hist_len = (cache.get(pid) or {}).get("n")
     if not tief or not hoch or hoch <= tief:
-        return None, tief, hoch
+        return None, tief, hoch, hist_len
     pos = max(0.0, min(1.0, (current_mv - tief) / (hoch - tief)))
-    return pos, tief, hoch
+    return pos, tief, hoch, hist_len
 
 
 def fetch_season_stats(token, league_id, player_id, history=None, today_str=None):
@@ -854,7 +863,7 @@ def analyze_opponents(token, league_id, ranking_res, my_manager_id,
     gespeicherten Kaderstand - dafuer werden history und today_str gebraucht.
     """
     blocked, profiles, squads = {}, [], []
-    total_sales = 0
+    total_sales = total_buys = 0
     for uid, name in extract_league_users(ranking_res):
         if str(uid) == str(my_manager_id):
             continue
@@ -866,12 +875,17 @@ def analyze_opponents(token, league_id, ranking_res, my_manager_id,
         squads.append(squad)
 
         if history is not None and today_str:
-            sales = detect_sales(name, squad, history, today_str)
+            sales, buys = detect_sales(name, squad, history, today_str)
             if sales:
                 total_sales += len(sales)
                 summe = sum(s["value"] for s in sales)
                 print(f"💸 {name}: {len(sales)} Verkauf/Verkäufe erkannt "
                       f"(~{fmt_money(summe)} geschätzt)")
+            if buys:
+                total_buys += len(buys)
+                summe_b = sum(b["value"] for b in buys)
+                print(f"🛒 {name}: {len(buys)} Kauf/Käufe erkannt "
+                      f"(~{fmt_money(summe_b)} geschätzt)")
 
         for tid, cnt in count_by_team(squad).items():
             if cnt >= CONFIG["MAX_PER_TEAM"]:
@@ -883,8 +897,13 @@ def analyze_opponents(token, league_id, ranking_res, my_manager_id,
             "missing_positions": missing_position_codes(pc),
         })
         time.sleep(CONFIG["OPPONENT_FETCH_SLEEP"])
+    zusatz = []
+    if total_sales:
+        zusatz.append(f"{total_sales} Verkäufe")
+    if total_buys:
+        zusatz.append(f"{total_buys} Käufe")
     print(f"🕵️ Konkurrenten analysiert: {len(profiles)}"
-          + (f", {total_sales} Verkäufe in diesem Lauf erkannt" if total_sales else ""))
+          + (f" ({', '.join(zusatz)} in diesem Lauf erkannt)" if zusatz else ""))
     return blocked, profiles, squads
 
 def get_my_team_counts(token, league_id, my_manager_id):
@@ -1216,11 +1235,23 @@ def detect_sales(manager_name, current_squad, history, today_str):
     current_snap = snapshot_squad(current_squad)
     previous = squads_store.get(manager_name, {}).get("players", {})
 
-    new_sales = []
+    buys_store = history.setdefault("_squadbuys", {})
+
+    new_sales, new_buys = [], []
     if previous:   # beim allerersten Lauf gibt es nichts zu vergleichen
         for pid, last_mv in previous.items():
             if pid not in current_snap:
                 new_sales.append({"player_id": pid, "value": last_mv, "date": today_str})
+        # NEU: Zugaenge im Kader = Kaeufe.
+        #
+        # Der Liga-Feed zeigt nur ~13 Eintraege fuer die ganze Liga; bei
+        # schalkerboy77 fehlten dadurch 8 von 12 Kaeufen. Die Kader holen wir
+        # ohnehin bei jedem Lauf - wer neu darin auftaucht, wurde gekauft.
+        # Bewertet mit dem aktuellen Marktwert (Untergrenze: bei Kaeufen vom
+        # Markt wird meist darueber geboten).
+        for pid, mv_jetzt in current_snap.items():
+            if pid not in previous:
+                new_buys.append({"player_id": pid, "value": mv_jetzt, "date": today_str})
 
     if new_sales:
         entry = sales_store.setdefault(manager_name, {"count": 0, "total": 0})
@@ -1228,9 +1259,40 @@ def detect_sales(manager_name, current_squad, history, today_str):
             entry["count"] += 1
             entry["total"] += s["value"]
 
+    if new_buys:
+        entry = buys_store.setdefault(manager_name, {"count": 0, "total": 0})
+        for b in new_buys:
+            entry["count"] += 1
+            entry["total"] += b["value"]
+
     # Aktuellen Stand fuer den naechsten Vergleich sichern
     squads_store[manager_name] = {"players": current_snap, "date": today_str}
-    return new_sales
+    return new_sales, new_buys
+
+
+def get_squadbuys_summary(history):
+    """Kaeufe je Manager, erkannt ueber Kader-Zugaenge."""
+    return history.get("_squadbuys", {})
+
+
+def combine_buys(feed_buys, squad_buys):
+    """
+    Fuehrt Feed-Kaeufe und ueber den Kader erkannte Kaeufe zusammen.
+    Beide erfassen dieselben Vorgaenge - der hoehere Wert gewinnt, addieren
+    waere Doppelzaehlung. Der Feed hat echte Preise, die Kaderbeobachtung
+    ist lueckenlos ab Beobachtungsbeginn.
+    """
+    combined = {}
+    for name in set(feed_buys) | set(squad_buys):
+        f = feed_buys.get(name, {"count": 0, "total": 0, "players": []})
+        s = squad_buys.get(name, {"count": 0, "total": 0})
+        if f["total"] >= s["total"]:
+            combined[name] = {"count": f["count"], "total": f["total"],
+                              "players": f.get("players", []), "source": "Feed"}
+        else:
+            combined[name] = {"count": s["count"], "total": s["total"],
+                              "players": f.get("players", []), "source": "Kader"}
+    return combined
 
 
 def get_sales_summary(history):
@@ -2147,7 +2209,25 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     # nicht existierenden Vorwert gerechnet wird. Solange wir den Spieler
     # nicht selbst ein paar Tage beobachtet haben, gibt es keine Prognose -
     # ein ehrliches "noch unbekannt" ist besser als eine Fantasiezahl.
-    ist_neuzugang = beobachtungstage < CONFIG["MIN_OBSERVED_DAYS"]
+    # Neuzugang anhand der KICKBASE-Historie bestimmen, nicht anhand unserer
+    # eigenen Beobachtungsdauer.
+    #
+    # Grund: Spieler wechseln staendig zwischen Kadern und Markt. Heuer
+    # Fernandes (33 Einsaetze, seit Jahren im HSV-Tor) tauchte erst gestern
+    # im Markt auf - unsere Historie kannte ihn also 1 Tag und stufte ihn als
+    # "neu in der Liga" ein. In der Folge blockierte der Bot 18 Spieler und
+    # meldete "keine Kaufchancen", obwohl 45 Mio Kaufkraft bereitstanden.
+    # Kickbase' eigene Historie unterscheidet sauber: etablierte Spieler haben
+    # 365 Eintraege, echte Neuzugaenge deutlich weniger.
+    # Muss VOR der Neuzugangs-Pruefung stehen: die Laenge der
+    # Kickbase-Historie entscheidet, ob ein Spieler wirklich neu ist.
+    range_pos, range_lo, range_hi, kb_hist_len = (mv_range or (None, None, None, None))
+    if kb_hist_len is not None:
+        ist_neuzugang = kb_hist_len < CONFIG["MIN_KB_HISTORY_DAYS"]
+    else:
+        # Ohne Kickbase-Historie (z.B. angebotene Spieler ohne Detailabruf)
+        # bleibt die eigene Beobachtungsdauer als Notbehelf.
+        ist_neuzugang = beobachtungstage < CONFIG["MIN_OBSERVED_DAYS"]
     if ist_neuzugang:
         daily_trend = 0
         has_real = False
@@ -2170,7 +2250,6 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
                    else 1.0)
     mf_lineup = lineup_factor_from_status(status_code)
     # Lage in der Jahresspanne: nahe am Hoch = wenig Luft nach oben.
-    range_pos, range_lo, range_hi = (mv_range or (None, None, None))
     mf_range = range_position_factor(range_pos)
     overpay_factor = (CONFIG["OVERPAY_BASE_FACTOR"]
                       * mf * mf_momentum * mf_lineup * mf_range)
@@ -2197,8 +2276,9 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
         category, reason = "blocked", "negative Schlagzeile — erst prüfen"
     elif ist_neuzugang:
         category = "pending"
-        reason = (f"neu in der Liga — Kickbase-Trend am Anfang unbrauchbar, "
-                  f"erst {beobachtungstage} Tag(e) beobachtet")
+        tage_txt = (f"{kb_hist_len} Tage Kickbase-Historie" if kb_hist_len is not None
+                    else f"erst {beobachtungstage} Tag(e) beobachtet")
+        reason = f"neu in der Liga — Trend noch unbrauchbar ({tage_txt})"
     elif not has_real or max_bid is None:
         category, reason = "pending", "noch kein Tagesvergleich — morgen entscheiden"
     elif my_budget is not None and max_bid > my_budget:
@@ -2233,6 +2313,7 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
         "range_pos": range_pos, "range_lo": range_lo, "range_hi": range_hi,
         "season_label": (season_stats or {}).get("season"),
         "is_newcomer": ist_neuzugang, "observed_days": beobachtungstage,
+        "kb_history_days": kb_hist_len,
         "appearances": appearances, "total_points_season": total_points_season,
         "apps_confidence": apps_confidence,
         "daily_trend": daily_trend, "kb_trend": kb_daily_trend,
@@ -2513,6 +2594,7 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
         # Verkaufserloese. Neu berechnen wuerde die wieder verlieren.
         radar_cash = cash_by_name or {}
 
+        unsicher = False
         for prof in sorted(opponent_profiles, key=lambda x: x["squad_size"]):
             gaps = ", ".join(prof["gaps"]) if prof["gaps"] else "vollständig"
             cash = radar_cash.get(prof["name"])
@@ -2522,15 +2604,25 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                 sell_txt = ""
                 if cash.get("known_sell_count"):
                     sell_txt = f" · Verkäufe {cash['known_sell_count']}×"
+                # Verlaesslichkeit kennzeichnen: Der Feed zeigt nur ~13
+                # Eintraege fuer die ganze Liga, die Kaderbeobachtung greift
+                # erst ab Beobachtungsbeginn. Wenige erfasste Vorgaenge bei
+                # vollem Kader heissen: da fehlt Historie.
+                erfasst = cash["known_buy_count"] + cash.get("known_sell_count", 0)
+                marker = "≈" if erfasst >= 6 else "≈?"
                 cash_text = (
-                    f" · Cash ≈ {fmt_money(cash['min_cash'])} €"
+                    f" · Cash {marker} {fmt_money(cash['min_cash'])} €"
                     f" · Käufe {cash['known_buy_count']}×{sell_txt}"
                 )
 
+            if cash and (cash["known_buy_count"] + cash.get("known_sell_count", 0)) < 6:
+                unsicher = True
             lines.append(
                 f"-  {esc(prof['name'])}: {prof['squad_size']} Spieler"
                 f" · {gaps}{cash_text}"
             )
+        if unsicher:
+            lines.append("   <i>≈? = wenige Transfers erfasst, Cash-Wert unsicher</i>")
 
         if transfer_summary:
             lines.append("\n💸 Transfer-Aktivität")
@@ -2647,6 +2739,15 @@ def main():
     transfer_summary = summarize_transfers_from_history(history)
     total_tx = len(history.get("_transfers", {}))
     print(f"Transfers im Feed: {len(transfers)} ({new_tx} neu) | gespeichert gesamt: {total_tx}")
+
+    # Kaeufe: Feed (echte Preise, lueckenhaft) + Kaderbeobachtung (lueckenlos
+    # ab Beobachtungsbeginn, Marktwert als Naeherung)
+    buys_squad = get_squadbuys_summary(history)
+    transfer_summary = combine_buys(transfer_summary, buys_squad)
+    kader_quellen = sum(1 for v in transfer_summary.values() if v.get("source") == "Kader")
+    if kader_quellen:
+        print(f"🛒 Käufe: bei {kader_quellen} Manager(n) liefert die "
+              f"Kaderbeobachtung mehr als der Feed")
 
     sales_feed = sales_from_feed_history(history)
     sales_squad = get_sales_summary(history)
