@@ -57,6 +57,12 @@ CONFIG = {
     # So viele Tage muss Kickbase selbst einen Spieler kennen, damit sein
     # Trend als belastbar gilt. Darunter: echter Neuzugang.
     "MIN_KB_HISTORY_DAYS": 30,
+    # Einstiegswert, den Kickbase neuen Spielern gibt. Eine Jahresspanne, die
+    # dort beginnt, sagt nichts ueber "teuer oder guenstig" aus.
+    "KB_ENTRY_VALUE": 500_000,
+    # Ab dieser Spreizung (Hoch/Tief) ist die Spanne ein Aufstiegsverlauf,
+    # kein Preisniveau.
+    "MAX_MEANINGFUL_RANGE_RATIO": 6.0,
     # Unterhalb dieses Marktwerts gilt ein Spieler als "Aufsteiger vom Boden":
     # dort beschleunigt der Anstieg, statt abzuflachen.
     "LOW_MV_THRESHOLD": 1_500_000,
@@ -432,6 +438,53 @@ def range_position(reihe, current_mv):
     return max(0.0, min(1.0, pos)), tief, hoch
 
 
+def is_meaningful_range(tief, hoch):
+    """
+    Ist die Jahresspanne ueberhaupt aussagekraeftig?
+
+    Kickbase setzt neue Spieler auf einen Einstiegswert von 500k. Wer seitdem
+    nur gestiegen ist, hat zwangsläufig Tief = 500k und steht automatisch bei
+    100% der Spanne. Die Meldung "nahe Jahreshoch" bedeutet dann NICHT
+    "teuer", sondern nur "war noch nie hoeher, weil er gerade erst anfing" -
+    also das Gegenteil der beabsichtigten Warnung.
+
+    Im letzten Report traf das auf 6 von 9 Kandidaten zu (Dzeko, Schwolow,
+    Guether ... alle mit Tief = 500k). Eine Warnung, die fast immer feuert,
+    unterscheidet nichts mehr.
+    """
+    if not tief or not hoch or hoch <= tief:
+        return False
+    if tief <= CONFIG["KB_ENTRY_VALUE"] * 1.05:
+        return False        # Spanne beginnt am Einstiegswert -> Artefakt
+    if hoch / tief > CONFIG["MAX_MEANINGFUL_RANGE_RATIO"]:
+        return False        # extreme Spreizung: Aufsteiger, kein Preisniveau
+    return True
+
+
+# Einstiegswert, den Kickbase neuen Spielern gibt. Eine Jahresspanne, die
+# genau dort beginnt, ist kein echter Kursverlauf, sondern der Weg eines
+# Spielers von seinem Startwert nach oben.
+KB_FLOOR_MV = 500_000
+
+
+def range_is_meaningful(tief, hoch):
+    """
+    Ist die Jahresspanne ueberhaupt aussagekraeftig?
+
+    Nein, wenn sie am Kickbase-Einstiegswert (500k) beginnt: Solche Spieler
+    sind seit ihrem Eintritt nur gestiegen, ihr aktueller Wert liegt also
+    zwangslaeufig beim Jahreshoch. Die Meldung "nahe Jahreshoch" hiesse dann
+    nicht "teuer", sondern "war noch nie hoeher, weil er gerade erst
+    angefangen hat" - das Gegenteil der beabsichtigten Warnung.
+
+    Beobachtet bei Dzeko (500k-9,7 Mio), Schwolow (500k-5,7 Mio) und
+    Guether (500k-2,1 Mio): alle bei 100%, alle ohne Aussagewert.
+    """
+    if not tief or not hoch:
+        return False
+    return tief > KB_FLOOR_MV * 1.05
+
+
 def range_position_factor(pos):
     """
     Uebersetzt die Lage in der Jahresspanne in einen Overpay-Faktor.
@@ -477,7 +530,9 @@ def get_cached_mv_range(token, league_id, player_id, current_mv, history, today_
     # wie lange WIR ihn beobachten. Ein HSV-Torwart mit 33 Einsaetzen hat
     # 365 Eintraege, ein echter Neuzugang deutlich weniger.
     hist_len = (cache.get(pid) or {}).get("n")
-    if not tief or not hoch or hoch <= tief:
+    if not is_meaningful_range(tief, hoch):
+        # Spanne unbrauchbar (beginnt am 500k-Einstiegswert oder ist extrem
+        # gespreizt) - lieber keine Aussage als eine irrefuehrende.
         return None, tief, hoch, hist_len
     pos = max(0.0, min(1.0, (current_mv - tief) / (hoch - tief)))
     return pos, tief, hoch, hist_len
@@ -1992,6 +2047,13 @@ def format_accuracy_line(acc):
         f"Treffer im Toleranzbereich: {acc['hit_rate']*100:.0f}%",
     ]
     cal = acc.get("calibration")
+    # Ausreisser-Hinweis: Einzelne extreme Fehlprognosen (typisch bei
+    # Neuzugaengen, deren erster Kickbase-Trend gegen einen nicht
+    # existierenden Vorwert gerechnet wird) verzerren den Schnitt tagelang,
+    # weil sie im 7-Tage-Fenster haengen bleiben.
+    if acc["n"] >= 20 and acc["direction_rate"] >= 0.85 and cal is not None and cal < 0.7:
+        parts.append("   <i>Richtung stimmt zuverlässig — der niedrige Wert kommt "
+                     "von wenigen Ausreißern, die aus dem 7-Tage-Fenster laufen.</i>")
     if cal is not None:
         if cal < 0.8:
             hinweis = f"Prognose zu optimistisch — reale Anstiege nur {cal*100:.0f}% der Vorhersage"
@@ -2250,6 +2312,9 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
                    else 1.0)
     mf_lineup = lineup_factor_from_status(status_code)
     # Lage in der Jahresspanne: nahe am Hoch = wenig Luft nach oben.
+    # Spanne nur verwenden, wenn sie nicht am 500k-Einstiegswert klebt.
+    if not range_is_meaningful(range_lo, range_hi):
+        range_pos = None
     mf_range = range_position_factor(range_pos)
     overpay_factor = (CONFIG["OVERPAY_BASE_FACTOR"]
                       * mf * mf_momentum * mf_lineup * mf_range)
@@ -2286,13 +2351,23 @@ def evaluate_player(player, history, injured_list, headlines, days_left,
     elif raw_profit >= 1_500_000:
         # Skala 1-5: ab 4 (Unwahrscheinlich) bzw. 5 (Ausgeschlossen) kein
         # Top-Kandidat mehr, egal wie gut der Marktwert-Trend aussieht.
-        if status_code is not None and status_code >= 4:
+        if status_code == 5:
+            # "Ausgeschlossen" heisst laut Kickbase-Legende: keine realistische
+            # Chance auf die Startelf. Ein solcher Spieler holt keine Punkte,
+            # egal wie gut sein Marktwert-Trend aussieht. Er gehoert nicht in
+            # den Kaufteil - auch nicht in die zweite Reihe mit Gebotsgrenze.
+            category = "skip"
+            reason = "ausgeschlossen — keine Aussicht auf Einsatz"
+        elif status_code == 4:
             category = "watch"
-            reason = f"hoher Trend, aber {STATUS_LABELS.get(status_code, 'unsicherer Status')} — Einsatz fraglich"
+            reason = "hoher Trend, aber Einsatz unwahrscheinlich"
         else:
             category, reason = "top", "hoher erwarteter Gewinn"
     elif raw_profit >= CONFIG["MIN_PROFIT_FOR_TOP"]:
-        category, reason = "watch", "solider Aufwärtstrend"
+        if status_code == 5:
+            category, reason = "skip", "ausgeschlossen — keine Aussicht auf Einsatz"
+        else:
+            category, reason = "watch", "solider Aufwärtstrend"
     else:
         category, reason = "skip", "kein nennenswerter Trend"
 
@@ -2457,6 +2532,9 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                 extras.append(f"📈 KB-Trend {fmt_profit(p['kb_trend'])} €/Tag")
             # Lage in der Jahresspanne - beantwortet "teuer oder guenstig?",
             # was der Tagestrend allein nicht sagt.
+            # range_pos wird in evaluate_player bereits auf None gesetzt,
+            # wenn die Spanne am 500k-Einstiegswert klebt - dann steht hier
+            # bewusst nichts statt einer irrefuehrenden Prozentzahl.
             if p.get("range_pos") is not None:
                 pct = p["range_pos"] * 100
                 if pct > 75:
