@@ -1089,6 +1089,116 @@ def parse_feed(feed_items):
     return transfers
 
 
+# ==========================================
+# MANUELL ERFASSTE TRANSFERS (aus der App)
+# ==========================================
+# Der Liga-Feed zeigt nur ~13 Eintraege fuer die gesamte Liga; alles Aeltere
+# ist fuer den Bot unsichtbar. Bei El Meiers 95 fehlten dadurch 3 von 8
+# Kaeufen und 11 von 12 Verkaeufen - die Cash-Schaetzung lag 32,3 Mio daneben
+# (-24,6 statt +7,7 Mio).
+#
+# Diese Liste schliesst die Luecke fuer die Zeit VOR dem ersten Bot-Lauf.
+# Format: (Manager, "buy"/"sell", Spieler, Betrag)
+# Die Eintraege werden ueber einen stabilen Schluessel dedupliziert, koennen
+# also gefahrlos mehrfach eingelesen werden. Ergaenzen ist jederzeit moeglich.
+MANUAL_TRANSFERS = [
+    # --- El Meiers 95 (Stand: 21.08.2026, vollstaendig aus der App) ---
+    ("El Meiers 95", "buy",  "Matanović",   19_111_111),
+    ("El Meiers 95", "buy",  "Kabak",       22_000_006),
+    ("El Meiers 95", "buy",  "Ginter",      26_999_999),
+    ("El Meiers 95", "buy",  "Machino",      3_333_330),
+    ("El Meiers 95", "buy",  "Mwene",        8_000_020),
+    ("El Meiers 95", "buy",  "Aouchiche",   15_111_111),
+    ("El Meiers 95", "buy",  "Knauff",       4_600_001),
+    ("El Meiers 95", "buy",  "Campbell",     5_300_090),
+    ("El Meiers 95", "sell", "Thielmann",    7_231_793),
+    ("El Meiers 95", "sell", "Poreba",      10_244_112),
+    ("El Meiers 95", "sell", "Gendrey",      4_213_224),
+    ("El Meiers 95", "sell", "Banks",        6_447_416),
+    ("El Meiers 95", "sell", "Skarke",       5_304_068),
+    ("El Meiers 95", "sell", "Uno",          3_171_707),
+    ("El Meiers 95", "sell", "Al Dakhil",    3_776_624),
+    ("El Meiers 95", "sell", "Rosenfelder",  3_945_406),
+    ("El Meiers 95", "sell", "Njinmah",      5_837_031),
+    ("El Meiers 95", "sell", "Vogt",         2_227_889),
+    ("El Meiers 95", "sell", "Gomis",        4_632_742),
+    ("El Meiers 95", "sell", "Reggiani",     4_538_029),
+
+    # --- MR_2606 (Stand: 21.08.2026, vollstaendig aus der App) ---
+    # Gegengeprueft ueber den Kader: 16 Spieler = 11 gekaufte + 5 aus dem
+    # Startkader. Keine Luecke.
+    ("MR_2606", "buy",  "Stange",       5_500_001),
+    ("MR_2606", "buy",  "Schwolow",     5_900_001),
+    ("MR_2606", "buy",  "Reis",         7_000_001),
+    ("MR_2606", "buy",  "Lochoshvili", 11_000_001),
+    ("MR_2606", "buy",  "Katic",       15_300_001),
+    ("MR_2606", "buy",  "Moreira",     26_500_001),
+    ("MR_2606", "buy",  "Hack",        11_200_001),
+    ("MR_2606", "buy",  "Futkeu",      11_000_001),
+    ("MR_2606", "buy",  "Remberg",     12_500_001),
+    ("MR_2606", "buy",  "Gruda",       24_000_001),
+    ("MR_2606", "buy",  "Oermann",      6_500_001),
+    ("MR_2606", "buy",  "Köbbing",        500_001),
+    ("MR_2606", "buy",  "Mickelson",    3_100_001),
+    ("MR_2606", "buy",  "Deman",       11_000_001),
+    ("MR_2606", "buy",  "Stiller",     37_000_001),
+    ("MR_2606", "buy",  "Baumgartner", 20_000_001),
+    ("MR_2606", "sell", "Schwolow",     5_817_322),
+    ("MR_2606", "sell", "Oermann",      6_277_246),
+    ("MR_2606", "sell", "Stiller",     37_027_842),
+    ("MR_2606", "sell", "Sakar",        6_453_438),
+    ("MR_2606", "sell", "Jovanovic",    6_137_990),
+    ("MR_2606", "sell", "Millgramm",    6_748_792),
+    ("MR_2606", "sell", "Deman",       10_459_311),
+    ("MR_2606", "sell", "Weiser",       5_137_648),
+    ("MR_2606", "sell", "Baumgartner", 19_871_019),
+    ("MR_2606", "sell", "Siebeking",    2_749_854),
+    ("MR_2606", "sell", "Widmer",       3_229_455),
+    ("MR_2606", "sell", "Andrich",      8_999_397),
+    ("MR_2606", "sell", "Bouanani",     1_708_594),
+    ("MR_2606", "sell", "Wójcik",       6_821_948),
+    ("MR_2606", "sell", "Nebel",        8_746_478),
+]
+
+
+def import_manual_transfers(history):
+    """
+    Traegt die manuell erfassten Transfers in die History ein.
+
+    Schluessel: "manual|<manager>|<kind>|<spieler>" - stabil und unabhaengig
+    von Feed-IDs. Ein Vorgang, den der Feed spaeter ebenfalls liefert, bekommt
+    dort eine andere ID und wuerde doppelt zaehlen. Deshalb wird zusaetzlich
+    geprueft, ob derselbe Manager/Spieler/Betrag schon vorliegt.
+
+    Rueckgabe: Anzahl neu eingetragener Vorgaenge.
+    """
+    if not MANUAL_TRANSFERS:
+        return 0
+    store = history.setdefault("_transfers", {})
+
+    # Bereits vorhandene Vorgaenge als Fingerabdruck sammeln
+    vorhanden = set()
+    for e in store.values():
+        if not isinstance(e, dict):
+            continue
+        mgr = e.get("manager") or e.get("buyer")
+        if mgr and e.get("player") and e.get("price"):
+            vorhanden.add((mgr, e.get("kind", "buy"), e["player"], int(e["price"])))
+
+    neu = 0
+    for manager, kind, player, price in MANUAL_TRANSFERS:
+        if (manager, kind, player, price) in vorhanden:
+            continue
+        key = f"manual|{manager}|{kind}|{player}"
+        if key in store:
+            continue
+        store[key] = {"kind": kind, "manager": manager, "player": player,
+                      "price": price, "date": None, "source": "manual"}
+        vorhanden.add((manager, kind, player, price))
+        neu += 1
+    return neu
+
+
 def merge_transfers_into_history(transfers, history):
     """
     Speichert Transfers dauerhaft, dedupliziert ueber die Feed-ID.
@@ -1215,8 +1325,15 @@ def migrate_transfer_store(history):
         manager = entry.get("manager") or entry.get("buyer")
         if not manager:
             continue
-        base = key.split("|")[0]
-        canonical = f"{base}|{kind}"
+        # Manuell erfasste Eintraege haben bereits einen eindeutigen
+        # Schluessel ("manual|<manager>|<kind>|<spieler>") und duerfen NICHT
+        # auf "<basis>|<kind>" verkuerzt werden - sonst kollidieren alle
+        # Kaeufe eines Managers auf "manual|buy" und ueberschreiben sich.
+        if key.startswith("manual|"):
+            canonical = key
+        else:
+            base = key.split("|")[0]
+            canonical = f"{base}|{kind}"
         clean = {
             "kind": kind,
             "manager": manager,
@@ -1224,6 +1341,8 @@ def migrate_transfer_store(history):
             "price": entry.get("price"),
             "date": entry.get("date"),
         }
+        if entry.get("source"):
+            clean["source"] = entry["source"]
         if canonical in normalized:
             removed += 1
             continue
@@ -2790,6 +2909,11 @@ def main():
     print(f"{len(headlines)} Schlagzeilen, {len(injured)} Verletzten-Eintraege.")
 
     history, history_sha = load_history()
+    manuell = import_manual_transfers(history)
+    if manuell:
+        print(f"📋 {manuell} manuell erfasste Transfers eingetragen "
+              f"(Lücke vor dem ersten Bot-Lauf)")
+
     removed = migrate_transfer_store(history)
     if removed:
         print(f"🧹 Transfer-Speicher bereinigt: {removed} doppelte Eintraege entfernt "
