@@ -1457,16 +1457,34 @@ def crawl_players(token, league_id, player_ids, history, today_str, sleep_s=0.2)
         time.sleep(sleep_s)
     return ok, failed
 
-LEAGUE_START_DATE = date(2026, 8, 15)
+# Saisonstart der Liga - Bezugspunkt fuer die kumulierte Auflaufpraemie.
+LEAGUE_START_DATE = date(2026, 8, 14)
 OPPONENT_START_CASH = 50_000_000
 
-def cumulative_login_bonus_per_player(today=None):
+def cumulative_login_bonus(today=None):
+    """
+    Kumulierte Auflaufpraemie seit Saisonstart - PRO MANAGER, nicht pro Spieler.
+
+    Kickbase zahlt taeglich eine Praemie, die mit jedem Login in Folge um
+    10.000 EUR steigt und ab Tag 10 bei 100.000 EUR gedeckelt ist:
+      Tag 1: 10k, Tag 2: 20k, ... Tag 9: 90k, ab Tag 10: 100k taeglich.
+
+    Wir rechnen mit dem MAXIMUM (taeglicher Login ohne Unterbrechung). Wer
+    Tage auslaesst, faellt auf der Staffel zurueck - das koennen wir nicht
+    sehen. Der Wert ist damit eine OBERGRENZE.
+
+    Vorher wurde dieser Betrag faelschlich mit der Kadergroesse multipliziert,
+    was die Praemie um das Zehn- bis Fuenfzehnfache ueberschaetzte (bei
+    MR_2606: 5,4 Mio statt 360k).
+    """
     today = today or date.today()
     days = max(1, (today - LEAGUE_START_DATE).days + 1)
 
     if days <= 9:
+        # Summe 10k + 20k + ... + days*10k
         return 10_000 * days * (days + 1) // 2
 
+    # Tage 1-9 ergeben 450k, danach 100k pro Tag
     return 450_000 + (days - 9) * 100_000
 
 def build_opponent_cash_tracker(opponent_profiles, transfer_summary, today=None,
@@ -1478,7 +1496,7 @@ def build_opponent_cash_tracker(opponent_profiles, transfer_summary, today=None,
     dem letzten bekannten Marktwert bewertet. Bei Verkaeufen an Mitmanager liegt
     der echte Erloes meist hoeher, die Schaetzung bleibt also konservativ.
     """
-    bonus_per_player = cumulative_login_bonus_per_player(today)
+    login_bonus_gesamt = cumulative_login_bonus(today)
     sales_summary = sales_summary or {}
     rows = []
 
@@ -1487,7 +1505,8 @@ def build_opponent_cash_tracker(opponent_profiles, transfer_summary, today=None,
         squad_size = profile["squad_size"]
         buys = (transfer_summary or {}).get(name, {"count": 0, "total": 0})
         sells = sales_summary.get(name, {"count": 0, "total": 0})
-        login_bonus = bonus_per_player * squad_size
+        # Praemie ist pro Manager - NICHT mit der Kadergroesse multiplizieren.
+        login_bonus = login_bonus_gesamt
         min_cash = (OPPONENT_START_CASH + login_bonus
                     - buys["total"] + sells["total"])
 
@@ -1505,7 +1524,7 @@ def build_opponent_cash_tracker(opponent_profiles, transfer_summary, today=None,
     return rows
 
 def print_cash_debug(cash_rows):
-    print("\n💰 CASH DEBUG — Start + Boni - Käufe + geschätzte Verkäufe")
+    print("\n💰 CASH DEBUG — Start 50 Mio + Auflaufprämie (max.) - Käufe + Verkäufe")
 
     for row in sorted(cash_rows, key=lambda item: item["min_cash"]):
         sell_part = ""
@@ -1515,7 +1534,7 @@ def print_cash_debug(cash_rows):
         print(
             f"• {row['name']}: Cash ≈ {fmt_money(row['min_cash'])} "
             f"| Start 50,0 Mio "
-            f"| Boni +{fmt_money(row['login_bonus'])} "
+            f"| Prämie +{fmt_money(row['login_bonus'])} "
             f"| Käufe -{fmt_money(row['known_buy_total'])} "
             f"({row['known_buy_count']}×)"
             f"{sell_part}"
