@@ -3948,6 +3948,230 @@
       "player": "Lynen",
       "price": 10494228,
       "date": "2026-08-23T20:11:22Z"
+    },
+    "manual|El Meiers 95|buy|Aouchiche": {
+      "kind": "buy",
+      "manager": "El Meiers 95",
+      "player": "Aouchiche",
+      "price": 15111111,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|El Meiers 95|buy|Knauff": {
+      "kind": "buy",
+      "manager": "El Meiers 95",
+      "player": "Knauff",
+      "price": 4600001,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|El Meiers 95|buy|Campbell": {
+      "kind": "buy",
+      "manager": "El Meiers 95",
+      "player": "Campbell",
+      "price": 5300090,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|El Meiers 95|sell|Banks": {
+      "kind": "sell",
+      "manager": "El Meiers 95",
+      "player": "Banks",
+      "price": 6447416,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|El Meiers 95|sell|Skarke": {
+      "kind": "sell",
+      "manager": "El Meiers 95",
+      "player": "Skarke",
+      "price": 5304068,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|El Meiers 95|sell|Uno": {
+      "kind": "sell",
+      "manager": "El Meiers 95",
+      "player": "Uno",
+      "price": 3171707,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|El Meiers 95|sell|Al Dakhil": {
+      "kind": "sell",
+      "manager": "El Meiers 95",
+      "player": "Al Dakhil",
+      "price": 3776624,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|El Meiers 95|sell|Rosenfelder": {
+      "kind": "sell",
+      "manager": "El Meiers 95",
+      "player": "Rosenfelder",
+      "price": 3945406,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|El Meiers 95|sell|Njinmah": {
+      "kind": "sell",
+      "manager": "El Meiers 95",
+      "player": "Njinmah",
+      "price": 5837031,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|El Meiers 95|sell|Vogt": {
+      "kind": "sell",
+      "manager": "El Meiers 95",
+      "player": "Vogt",
+      "price": 2227889,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|El Meiers 95|sell|Gomis": {
+      "kind": "sell",
+      "manager": "El Meiers 95",
+      "player": "Gomis",
+      "price": 4632742,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|El Meiers 95|sell|Reggiani": {
+      "kind": "sell",
+      "manager": "El Meiers 95",
+      "player": "Reggiani",
+      "price": 4538029,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|buy|Gruda": {
+      "kind": "buy",
+      "manager": "MR_2606",
+      "player": "Gruda",
+      "price": 24000001,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|buy|Oermann": {
+      "kind": "buy",
+      "manager": "MR_2606",
+      "player": "Oermann",
+      "price": 6500001,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|buy|Köbbing": {
+      "kind": "buy",
+      "manager": "MR_2606",
+      "player": "Köbbing",
+      "price": 500001,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|buy|Mickelson": {
+      "kind": "buy",
+      "manager": "MR_2606",
+      "player": "Mickelson",
+      "price": 3100001,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|buy|Deman": {
+      "kind": "buy",
+      "manager": "MR_2606",
+      "player": "Deman",
+      "price": 11000001,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|buy|Stiller": {
+      "kind": "buy",
+      "manager": "MR_2606",
+      "player": "Stiller",
+      "price": 37000001,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|buy|Baumgartner": {
+      "kind": "buy",
+      "manager": "MR_2606",
+      "player": "Baumgartner",
+      "price": 20000001,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|sell|Deman": {
+      "kind": "sell",
+      "manager": "MR_2606",
+      "player": "Deman",
+      "price": 10459311,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|sell|Weiser": {
+      "kind": "sell",
+      "manager": "MR_2606",
+      "player": "Weiser",
+      "price": 5137648,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|sell|Baumgartner": {
+      "kind": "sell",
+      "manager": "MR_2606",
+      "player": "Baumgartner",
+      "price": 19871019,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|sell|Siebeking": {
+      "kind": "sell",
+      "manager": "MR_2606",
+      "player": "Siebeking",
+      "price": 2749854,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|sell|Widmer": {
+      "kind": "sell",
+      "manager": "MR_2606",
+      "player": "Widmer",
+      "price": 3229455,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|sell|Andrich": {
+      "kind": "sell",
+      "manager": "MR_2606",
+      "player": "Andrich",
+      "price": 8999397,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|sell|Bouanani": {
+      "kind": "sell",
+      "manager": "MR_2606",
+      "player": "Bouanani",
+      "price": 1708594,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|sell|Wójcik": {
+      "kind": "sell",
+      "manager": "MR_2606",
+      "player": "Wójcik",
+      "price": 6821948,
+      "date": null,
+      "source": "manual"
+    },
+    "manual|MR_2606|sell|Nebel": {
+      "kind": "sell",
+      "manager": "MR_2606",
+      "player": "Nebel",
+      "price": 8746478,
+      "date": null,
+      "source": "manual"
     }
   },
   "_squads": {
@@ -4976,6 +5200,12 @@
       "lo": 500000,
       "hi": 6471724,
       "n": 30
+    },
+    "15472": {
+      "d": "2026-08-23",
+      "lo": 4182765,
+      "hi": 12082119,
+      "n": 32
     }
   },
   "_seasonstats": {
@@ -5602,6 +5832,10 @@
         "avg_points": -6.0,
         "season": "2025/2026"
       }
+    },
+    "15472": {
+      "d": "2026-08-23",
+      "v": null
     }
   },
   "1246": {
@@ -6507,6 +6741,14 @@
       {
         "d": "2026-08-23",
         "mv": 4016862
+      }
+    ]
+  },
+  "15472": {
+    "days": [
+      {
+        "d": "2026-08-23",
+        "mv": 12069742
       }
     ]
   }
