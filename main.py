@@ -88,6 +88,10 @@ CONFIG = {
     "DISCOVER_BUDGET": False,
     # Anteil des Teamwerts, um den man ins Minus gehen darf (Kickbase-Regel).
     "OVERDRAFT_PCT": 0.33,
+    # Telegram antwortet gelegentlich nicht rechtzeitig - mehrere Versuche
+    # mit groesserem Zeitfenster statt Abbruch des ganzen Laufs.
+    "TELEGRAM_RETRIES": 3,
+    "TELEGRAM_TIMEOUT": 30,
     # Sucht einmalig den Endpunkt fuer den historischen Marktwert-Verlauf
     # (die App zeigt bis zu 1 Jahr). Nach dem Fund abschaltbar.
 
@@ -325,6 +329,24 @@ def extract_team_values(ranking_res):
             tv = item.get("tv")
             if uid and isinstance(tv, (int, float)) and tv > 0:
                 werte[str(uid)] = int(tv)
+        if werte:
+            break
+    return werte
+
+
+def team_values_by_name(ranking_res):
+    """Teamwerte je Manager-NAME (der Cash-Tracker arbeitet mit Namen)."""
+    werte = {}
+    if not isinstance(ranking_res, dict):
+        return werte
+    for value in ranking_res.values():
+        if not (isinstance(value, list) and value and isinstance(value[0], dict)):
+            continue
+        for item in value:
+            name = item.get("n") or item.get("name")
+            tv = item.get("tv")
+            if name and isinstance(tv, (int, float)) and tv > 0:
+                werte[name] = int(tv)
         if werte:
             break
     return werte
@@ -974,7 +996,12 @@ def assess_competition(pos_code, opponent_profiles, cash_by_name, price_threshol
         if pos_code not in prof.get("missing_positions", []):
             continue
         cash_info = cash_by_name.get(prof["name"])
-        min_cash = cash_info["min_cash"] if cash_info else None
+        # Unmoegliche Cash-Werte nicht verwenden - sonst wuerde ein Rivale
+        # faelschlich als zahlungsunfaehig eingestuft.
+        if cash_info and not cash_info.get("cash_plausible", True):
+            min_cash = None
+        else:
+            min_cash = cash_info["min_cash"] if cash_info else None
         competitors.append((prof["name"], min_cash))
     competitors.sort(key=lambda x: (x[1] is None, -(x[1] or 0)))
     return competitors
@@ -1606,8 +1633,28 @@ def cumulative_login_bonus(today=None):
     # Tage 1-9 ergeben 450k, danach 100k pro Tag
     return 450_000 + (days - 9) * 100_000
 
+def check_cash_plausibility(min_cash, team_value):
+    """
+    Prueft, ob ein errechneter Cash-Wert ueberhaupt moeglich ist.
+
+    Kickbase erlaubt hoechstens 33% des Teamwerts als Ueberziehung. Wer
+    darunter liegt, koennte in der App gar nicht so dastehen - dann fehlen
+    dem Bot Verkaeufe.
+
+    Beispiel MarvinKulas: 11 Spieler, errechnet -46,1 Mio. Bei seinem
+    Teamwert liegt der Rahmen bei rund 35 Mio - der Wert ist also
+    nachweislich falsch, nicht nur unsicher.
+
+    Rueckgabe: (ist_moeglich, erlaubtes_minimum)
+    """
+    if not team_value or min_cash is None:
+        return True, None
+    limit = -int(team_value * CONFIG["OVERDRAFT_PCT"])
+    return min_cash >= limit, limit
+
+
 def build_opponent_cash_tracker(opponent_profiles, transfer_summary, today=None,
-                                 sales_summary=None):
+                                 sales_summary=None, team_values=None):
     """
     Cash-Schaetzung: Startkapital + Login-Boni - Kaeufe + geschaetzte Verkaufserloese.
 
@@ -1629,9 +1676,14 @@ def build_opponent_cash_tracker(opponent_profiles, transfer_summary, today=None,
         min_cash = (OPPONENT_START_CASH + login_bonus
                     - buys["total"] + sells["total"])
 
+        tv = (team_values or {}).get(name)
+        moeglich, limit = check_cash_plausibility(min_cash, tv)
         rows.append({
             "name": name,
             "squad_size": squad_size,
+            "team_value": tv,
+            "cash_plausible": moeglich,
+            "overdraft_limit": limit,
             "known_buy_count": buys["count"],
             "known_buy_total": buys["total"],
             "known_sell_count": sells["count"],
@@ -1650,6 +1702,10 @@ def print_cash_debug(cash_rows):
         if row.get("known_sell_count"):
             sell_part = (f" | Verkäufe +{fmt_money(row['known_sell_total'])} "
                          f"({row['known_sell_count']}×)")
+        if not row.get("cash_plausible"):
+            print(f"• {row['name']}: ⚠️ UNMÖGLICH {fmt_money(row['min_cash'])} "
+                  f"(Limit {fmt_money(row['overdraft_limit'])} bei Teamwert "
+                  f"{fmt_money(row.get('team_value'))}) — es fehlen Verkäufe")
         print(
             f"• {row['name']}: Cash ≈ {fmt_money(row['min_cash'])} "
             f"| Start 50,0 Mio "
@@ -2825,11 +2881,20 @@ def build_report(evaluated, my_budget, days_left, opponent_profiles,
                 # erst ab Beobachtungsbeginn. Wenige erfasste Vorgaenge bei
                 # vollem Kader heissen: da fehlt Historie.
                 erfasst = cash["known_buy_count"] + cash.get("known_sell_count", 0)
-                marker = "≈" if erfasst >= 6 else "≈?"
-                cash_text = (
-                    f" · Cash {marker} {fmt_money(cash['min_cash'])} €"
-                    f" · Käufe {cash['known_buy_count']}×{sell_txt}"
-                )
+                if not cash.get("cash_plausible", True):
+                    # Rechnerisch unmoeglich (unter dem 33%-Ueberziehungslimit):
+                    # es fehlen Verkaeufe. Eine konkrete Zahl waere hier
+                    # schlicht falsch - lieber ehrlich keine nennen.
+                    cash_text = (
+                        f" · Cash unbekannt (Daten unvollständig)"
+                        f" · Käufe {cash['known_buy_count']}×{sell_txt}"
+                    )
+                else:
+                    marker = "≈" if erfasst >= 6 else "≈?"
+                    cash_text = (
+                        f" · Cash {marker} {fmt_money(cash['min_cash'])} €"
+                        f" · Käufe {cash['known_buy_count']}×{sell_txt}"
+                    )
 
             if cash and (cash["known_buy_count"] + cash.get("known_sell_count", 0)) < 6:
                 unsicher = True
@@ -2879,18 +2944,39 @@ def send_telegram(message):
     print(f"DEBUG Telegram {len(chunks)} Teile...")
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     for i, chunk in enumerate(chunks, 1):
-        resp = requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID, "text": chunk,
-            "parse_mode": "HTML", "disable_web_page_preview": True,
-        }, timeout=CONFIG["REQUEST_TIMEOUT"])
-        print(f"DEBUG Telegram {i}/{len(chunks)} {len(chunk)}Z. HTTP {resp.status_code}")
+        # Mehrere Versuche mit groesserem Zeitfenster: Telegram antwortet
+        # gelegentlich nicht rechtzeitig. Frueher brach der Lauf dann mit
+        # Fehlercode ab, obwohl Datensammlung und Speicherung fertig waren.
+        resp = None
+        for versuch in range(CONFIG["TELEGRAM_RETRIES"]):
+            try:
+                resp = requests.post(url, json={
+                    "chat_id": TELEGRAM_CHAT_ID, "text": chunk,
+                    "parse_mode": "HTML", "disable_web_page_preview": True,
+                }, timeout=CONFIG["TELEGRAM_TIMEOUT"])
+                print(f"DEBUG Telegram {i}/{len(chunks)} {len(chunk)}Z. "
+                      f"HTTP {resp.status_code}")
+                break
+            except Exception as e:
+                warten = 3 * (versuch + 1)
+                print(f"⚠️ Telegram-Versuch {versuch+1}/{CONFIG['TELEGRAM_RETRIES']} "
+                      f"fehlgeschlagen ({type(e).__name__}) — warte {warten}s")
+                if versuch < CONFIG["TELEGRAM_RETRIES"] - 1:
+                    time.sleep(warten)
+
+        if resp is None:
+            print(f"❌ Teil {i}/{len(chunks)} nicht zugestellt.")
+            continue
         if resp.ok:
             time.sleep(0.25)
             continue
-        plain = re.sub(r"<[^>]+>", "", chunk)
-        requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID, "text": plain,
-        }, timeout=CONFIG["REQUEST_TIMEOUT"])
+        try:
+            plain = re.sub(r"<[^>]+>", "", chunk)
+            requests.post(url, json={
+                "chat_id": TELEGRAM_CHAT_ID, "text": plain,
+            }, timeout=CONFIG["TELEGRAM_TIMEOUT"])
+        except Exception as e:
+            print(f"❌ Klartext-Versand fehlgeschlagen: {type(e).__name__}")
         time.sleep(0.25)
 
 def main():
@@ -2952,6 +3038,9 @@ def main():
 
     my_squad_items = get_squad(token, league_id, my_manager_id) if my_manager_id else []
     my_gap_codes = missing_position_codes(count_by_pos(my_squad_items))
+    if my_squad_items:
+        luecken = ", ".join(pos_gaps(count_by_pos(my_squad_items))) or "keine"
+        print(f"👤 Dein Kader: {len(my_squad_items)} Spieler · Lücken: {luecken}")
 
     feed_items = get_league_feed(token, league_id)
     diagnose_feed_types(feed_items)
@@ -2978,10 +3067,12 @@ def main():
         print(f"Verkäufe erfasst: {len(sales_summary)} Manager "
               f"({feed_n}× aus Feed mit echten Preisen, Rest geschätzt)")
 
+    tv_by_name = team_values_by_name(ranking_res)
     cash_debug_rows = build_opponent_cash_tracker(
         opponent_profiles,
         transfer_summary,
         sales_summary=sales_summary,
+        team_values=tv_by_name,
     )
     print_cash_debug(cash_debug_rows)
     cash_by_name = {row["name"]: row for row in cash_debug_rows}
@@ -3104,7 +3195,13 @@ def main():
                           my_gap_codes=my_gap_codes, cash_by_name=cash_by_name,
                           accuracy=accuracy, buying_power=buying_power,
                           overdraft=overdraft, field_warnings=field_warnings)
-    send_telegram(report)
+    try:
+        send_telegram(report)
+    except Exception as e:
+        # Versand ist der letzte Schritt - die Daten sind da bereits gespeichert.
+        # Ein Netzwerkfehler darf den Lauf nicht als gescheitert markieren.
+        print(f"⚠️ Telegram-Versand fehlgeschlagen: {type(e).__name__}: {e}")
+        print("   (Daten wurden trotzdem gespeichert)")
     print("Pipeline-Durchlauf vollkommen erfolgreich beendet!")
 
 if __name__ == "__main__":
